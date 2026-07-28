@@ -1,0 +1,14 @@
+---
+name: memory_benchmark
+version: 1.0.0
+# This is the interface version the plugin targets (PluginLoader spec).
+spec_version: "1.0"
+description: >-
+  Memory search recall/latency benchmarks — wraps existing benchmark_memchorus.py
+  logic so optional test categories can participate in the Polygraph runner
+  without hardcoding them into the core battery.
+categories:
+  - MemoryRecall
+  - Benchmarks
+author: BuboTheWise
+license: MIT

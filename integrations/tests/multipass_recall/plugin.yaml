@@ -1,0 +1,13 @@
+---
+name: multipass_recall
+version: 1.0.0
+spec_version: "1.0"
+description: >-
+  Multi-pass recall benchmark — verifies that memory accumulation across
+  successive passes measurably improves semantic search quality (based on
+  existing benchmark_multipass.py methodology).
+categories:
+  - MemoryRecall
+  - Benchmarks
+author: BuboTheWise
+license: MIT
