@@ -17,11 +17,11 @@ The core Polygraph verification battery currently has test categories hardcoded.
 ### Directory Layout
 
 ```
-MemChorus/
+Polygraph/
 ├── integrations/
 │   ├── __init__.py             # (existing) runtime integration hooks
-│   ├── hermes/                 # (existing) lifecycle hooks plugin
-│   └── tests/                  # NEW: verification test plugins
+│   ◦─────────────               # (optional) framework-specific lifecycle hooks
+│   └── tests                   # NEW: verification test plugins
 │       ├── __init__.py         # PluginLoader class + IntegrationPlugin base protocol
 │       ├── memory_benchmark/
 │       │   ├── plugin.yaml     # name, version, description, categories[]
@@ -105,10 +105,10 @@ The core test definitions remain unchanged. Plugin tests appear alongside built-
 
 | Decision | Rationale |
 |----------|-----------|
-| Plugin YAML manifest separate from code | Mirrors `integrations/hermes/plugin.yaml` convention already in the repo |
+| Plugin YAML manifest separate from code | Clean separation between plugin metadata and implementation code |
 | `discover_tests(config)` returns TestDefinition objects | Each plugin declares its own tests; runner doesn't need to know test internals |
 | Config-driven enable/disable | User opts into heavy benchmark suites without modifying code |
-| Lazy import on demand | Missing dependencies (e.g., MemPalace MCP) don't block core tests |
+| Lazy import on demand | Missing dependencies (e.g., optional MCP servers) don't block core tests |
 | Plugins under `integrations/tests/` | Keeps the integrations directory as a single namespace for all extension points |
 
 ## Phased Approach
