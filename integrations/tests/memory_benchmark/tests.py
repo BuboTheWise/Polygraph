@@ -77,7 +77,7 @@ def discover_tests(config: Dict[str, Any]) -> List[TestDefinition]:
         A flat list of TestDefinitions for this plugin.
     """
     data_dir = str(
-        Path(config.get("data_dir", "~/.hermes/memchorus_benchmarks")).expanduser()
+        Path(config.get("data_dir", "~/.local/share/polygraph/benchmarks")).expanduser()
     )
     fact_limit = config.get("fact_count", len(FACTS))
 

@@ -53,7 +53,7 @@ Four categories are **critical path**: truthfulness, tool-use, safety, and claim
 
 ## Configuration
 
-The canonical configuration template lives in [`config/polygraph.yaml`](config/pulygraph.yaml) with:
+The canonical configuration template lives in [`config/polygraph.yaml`](config/polygraph.yaml) with:
 - 4 severity profiles with test selections
 - Category pass/fail thresholds and critical-path flags
 - Provider failover chains (ordered, first-available wins)
