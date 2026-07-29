@@ -73,7 +73,7 @@ plugins:
     enabled: true
     categories: ["MemorySearch"]
     params:
-      data_dir: "~/.hermes/memchorus_benchmarks"
+      data_dir: "~/.local/share/polygraph/benchmarks"
       fact_count: 10
   multipass_recall:
     enabled: false             # opt-in, requires specific environment
