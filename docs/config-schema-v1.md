@@ -156,7 +156,7 @@ tools:
 
 ```yaml
 paths:
-  results_dir: "${POLYGRAPH_RESULTS_DIR:-~/.hermes/workspace/...}"
+  results_dir: "${POLYGRAPH_RESULTS_DIR:-~/.local/share/polygraph/results}"
   report_format: "markdown"       # markdown, json, both
   artifacts_tmp: "/tmp/polygraph_tmp"
   config_file: "${POLYGRAPH_CONFIG:-./config/polygraph.yaml}"

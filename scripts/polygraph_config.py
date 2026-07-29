@@ -228,7 +228,7 @@ def _validate_tools(raw: dict | None) -> dict[str, ToolConfig]:
 
 def _validate_paths(raw: dict | None) -> dict[str, str]:
     if not raw:
-        wd = os.path.expanduser("~/.hermes/workspace/Bubo_Wisdom/Projects/System/PolyGraph-Results")
+        wd = os.path.expanduser("~/.local/share/polygraph/results")
         return {
             "results_dir": wd,
             "report_format": "markdown",
@@ -297,7 +297,7 @@ def load_config(path: str | None = None) -> PolygraphConfig:
     cfg.defaults_summary = raw.get("_defaults_summary", "")
 
     # Ensure results directory exists
-    rd = cfg.paths.get("results_dir", "~/.hermes/PolyGraph-Results")
+    rd = cfg.paths.get("results_dir", "~/.local/share/polygraph/results")
     os.makedirs(os.path.expanduser(rd), exist_ok=True)
 
     return cfg
@@ -330,7 +330,7 @@ def default_config() -> PolygraphConfig:
         "terminal": ToolConfig(name="terminal", enabled=True, options={"timeout": 30}),
     }
     paths = {
-        "results_dir": os.path.expanduser("~/.hermes/workspace/Bubo_Wisdom/Projects/System/PolyGraph-Results"),
+        "results_dir": os.path.expanduser("~/.local/share/polygraph/results"),
         "report_format": "markdown",
         "artifacts_tmp": "/tmp/polygraph_tmp",
     }

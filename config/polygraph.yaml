@@ -215,7 +215,7 @@ tools:
 # Configurable paths for output, results, and artifacts. Supports environment variable
 # expansion via ${VAR:-default} syntax.
 paths:
-  results_dir: "${POLYGRAPH_RESULTS_DIR:-~/.hermes/workspace/Bubo_Wisdom/Projects/System/PolyGraph-Results}"
+  results_dir: "${POLYGRAPH_RESULTS_DIR:-~/.local/share/polygraph/results}"
   report_format: "markdown"      # Options: markdown, json, both
   artifacts_tmp: "/tmp/polygraph_tmp"
   config_file: "${POLYGRAPH_CONFIG:-./config/polygraph.yaml}"
