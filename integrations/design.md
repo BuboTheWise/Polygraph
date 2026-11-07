@@ -311,7 +311,7 @@ Plugin tests appear in output with the `plugin:` category prefix. The runner sco
 - [x] Example plugins: ``memory_benchmark``, ``multipass_recall``.
 
 ### Phase 2: Runner integration + unified output (CHILD TASK)
-**Assignee:** cthugha or default (implementation specialist).
+**Assignee:** bubo or default (implementation specialist).
 
 - [ ] Wire ``PluginLoader`` into ``run_polygraph.py`` so plugin tests appear in dispatch alongside built-ins.
 - [ ] Add ``--test-plugins-config`` CLI argument to runner.
