@@ -311,7 +311,7 @@ Plugin tests appear in output with the `plugin:` category prefix. The runner sco
 - [x] Example plugins: ``memory_benchmark``, ``multipass_recall``.
 
 ### Phase 2: Runner integration + unified output (CHILD TASK)
-**Assignee:** bubo or default (implementation specialist).
+**Assignee:** a development profile (implementation specialist).
 
 - [ ] Wire ``PluginLoader`` into ``run_polygraph.py`` so plugin tests appear in dispatch alongside built-ins.
 - [ ] Add ``--test-plugins-config`` CLI argument to runner.
@@ -319,7 +319,7 @@ Plugin tests appear in output with the `plugin:` category prefix. The runner sco
 - [ ] Optional ``score_test()`` hook honored if present.
 
 ### Phase 3: Lifecycle hooks and dependency management (FUTURE)
-**Assignee:** default (architecture oversight).
+**Assignee:** a coordination profile (architecture oversight).
 
 - [ ] `setup()` / `teardown()` lifecycle hooks in loader with proper error isolation.
 - [ ] Manifest-based dependency declarations (`python_packages`, `binaries`) with graceful skip logic.
@@ -327,7 +327,7 @@ Plugin tests appear in output with the `plugin:` category prefix. The runner sco
 
 ### Phase 4: Distribution-ready packaging (FUTURE)
 
-**Assignee:** default (release management).
+**Assignee:** a coordination profile (release management).
 
 - [ ] Pack plugins as installable extras (e.g., ``pip install polygraph[memory_benchmark]``).
 - [ ] Plugin discovery via entry points in addition to config-driven loading.
