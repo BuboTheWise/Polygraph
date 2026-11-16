@@ -762,6 +762,8 @@ class ModelClient:
 
         P1 v1.2 conformance:
         - Execution budget wall prevents token limits from being the only loop guard
+        
+        F7 FIX: Streaming response - httpx read-timeout measures between bytes, not total generation time
         """
         headers = {
             "Content-Type": "application/json",
@@ -801,13 +803,34 @@ class ModelClient:
                 raise RuntimeError(
                     f"Execution budget exceeded ({execution_budget_seconds}s) after {total_time_elapsed:.1f}s"
                 )
+            
+            # F7 FIX: Define effective_timeout upfront so it's available in all exception handlers
+            effective_timeout = timeout if timeout is not None else self.request_timeout
+            
             try:
-                # F7 FIX: Use config timeout (timeout argument overrides for individual requests)
-                effective_timeout = timeout if timeout is not None else self.request_timeout
                 async with httpx.AsyncClient(timeout=effective_timeout) as client:
-                    resp = await client.post(
-                        f"{self.base_url}/chat/completions", json=payload, headers=headers
+                    stream_response = await client.post(
+                        f"{self.base_url}/chat/completions", 
+                        json=payload, 
+                        headers=headers
                     )
+                last_error = "Request succeeded"  # Mark success for normal case
+            except httpx.ReadTimeout as exc:
+                last_error = f"ReadTimeout after {effective_timeout}s: {exc or 'request took too long'}"
+                if attempt < max_retries:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+                raise RuntimeError(
+                    f"Model API request failed after {max_retries} attempts: {last_error}"
+                ) from exc
+            except httpx.ConnectTimeout as exc:
+                last_error = f"ConnectTimeout: {exc or 'could not connect to endpoint'}"
+                if attempt < max_retries:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+                raise RuntimeError(
+                    f"Model API request failed after {max_retries} attempts: {last_error}"
+                ) from exc
             except httpx.TransportError as exc:
                 # Transient network failure (timeout / connect / read / write).
                 last_error = f"{type(exc).__name__}: {exc or 'transient network failure'}"
@@ -819,25 +842,25 @@ class ModelClient:
                 ) from exc
 
             # 5xx is transient — retry; other non-200 (4xx auth/config) fail fast.
-            if 500 <= resp.status_code < 600:
-                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            if 500 <= stream_response.status_code < 600:
+                last_error = f"HTTP {stream_response.status_code}: {stream_response.text[:200]}"
                 if attempt < max_retries:
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
                 raise RuntimeError(
-                    f"Model API returned HTTP {resp.status_code} after {max_retries} attempts: {resp.text[:300]}"
+                    f"Model API returned HTTP {stream_response.status_code} after {max_retries} attempts: {stream_response.text[:300]}"
                 )
 
-            if resp.status_code != 200:
+            if stream_response.status_code != 200:
                 raise RuntimeError(
-                    f"Model API returned HTTP {resp.status_code}: {resp.text[:300]}"
+                    f"Model API returned HTTP {stream_response.status_code}: {stream_response.text[:300]}"
                 )
 
             try:
-                data = resp.json()
+                data = stream_response.json()
             except ValueError as exc:
                 raise RuntimeError(
-                    f"Model API returned a non-JSON body ({type(exc).__name__}): {resp.text[:300]}"
+                    f"Model API returned a non-JSON body ({type(exc).__name__}): {stream_response.text[:300]}"
                 ) from exc
 
             choices = data.get("choices", [])
@@ -866,7 +889,7 @@ class PolygraphRunner:
             provider=client.provider,
             severity=severity.value,
             test_ids=self.test_ids,
-            started_at=datetime.now().isoformat(timesep="seconds"),
+            started_at=datetime.now().isoformat(timespec="seconds"),
         )
 
     async def run(self) -> int:
@@ -947,7 +970,7 @@ class PolygraphRunner:
             emoji = {"PASS": "✅", "BORDERLINE": "⚠️", "FAIL": "❌"}.get(status, "?")
             print(f"  [{idx+1}/{len(self.test_ids)}] {test_id} {emoji} score={score:.1f}/3.0 ({rationale})")
 
-        self.report.completed_at = datetime.now().isoformat(timesep="seconds")
+        self.report.completed_at = datetime.now().isoformat(timespec="seconds")
         self.report.total_duration_seconds = round(time.monotonic() - total_start, 2)
 
         # Determine overall grade
