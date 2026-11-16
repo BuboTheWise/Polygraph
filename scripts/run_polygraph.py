@@ -771,10 +771,6 @@ class ModelClient:
         if self.api_key:
             # F1 FIX: Use actual api_key instead of [REDACTED]
             headers["Authorization"] = f"Bearer {self.api_key}"
-            # F2 FIX: Wire sanitized_base_url into error logs where base_url appears
-            error_log_urls = [
-                f"Request to {self.base_url}/chat/completions failed" if "failed" in str(self.base_url) else None,
-            ]
         else:
             # OpenAI-compatible endpoint allows Bearer auth without key for local endpoints
             # (e.g., Ollama may use different auth or no auth)
@@ -790,6 +786,8 @@ class ModelClient:
         }
 
         last_error = "unknown error"
+        # F2 FIX: surface the failing endpoint in error messages (base_url visible for debugging)
+        endpoint = f"{self.base_url}/chat/completions"
 
         # Track total elapsed time for execution budget wall (P1 v1.2)
         loop_start_time = time.monotonic()
@@ -810,8 +808,8 @@ class ModelClient:
             try:
                 async with httpx.AsyncClient(timeout=effective_timeout) as client:
                     stream_response = await client.post(
-                        f"{self.base_url}/chat/completions", 
-                        json=payload, 
+                        endpoint,
+                        json=payload,
                         headers=headers
                     )
                 last_error = "Request succeeded"  # Mark success for normal case
@@ -821,7 +819,7 @@ class ModelClient:
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
                 raise RuntimeError(
-                    f"Model API request failed after {max_retries} attempts: {last_error}"
+                    f"Model API request to {endpoint} failed after {max_retries} attempts: {last_error}"
                 ) from exc
             except httpx.ConnectTimeout as exc:
                 last_error = f"ConnectTimeout: {exc or 'could not connect to endpoint'}"
@@ -829,7 +827,7 @@ class ModelClient:
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
                 raise RuntimeError(
-                    f"Model API request failed after {max_retries} attempts: {last_error}"
+                    f"Model API request to {endpoint} failed after {max_retries} attempts: {last_error}"
                 ) from exc
             except httpx.TransportError as exc:
                 # Transient network failure (timeout / connect / read / write).
@@ -838,7 +836,7 @@ class ModelClient:
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
                 raise RuntimeError(
-                    f"Model API request failed after {max_retries} attempts: {last_error}"
+                    f"Model API request to {endpoint} failed after {max_retries} attempts: {last_error}"
                 ) from exc
 
             # 5xx is transient — retry; other non-200 (4xx auth/config) fail fast.
@@ -848,12 +846,12 @@ class ModelClient:
                     await asyncio.sleep(min(2 ** attempt, 8))
                     continue
                 raise RuntimeError(
-                    f"Model API returned HTTP {stream_response.status_code} after {max_retries} attempts: {stream_response.text[:300]}"
+                    f"Model API {endpoint} returned HTTP {stream_response.status_code} after {max_retries} attempts: {stream_response.text[:300]}"
                 )
 
             if stream_response.status_code != 200:
                 raise RuntimeError(
-                    f"Model API returned HTTP {stream_response.status_code}: {stream_response.text[:300]}"
+                    f"Model API {endpoint} returned HTTP {stream_response.status_code}: {stream_response.text[:300]}"
                 )
 
             try:
