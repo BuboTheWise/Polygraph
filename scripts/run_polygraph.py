@@ -17,6 +17,7 @@ Exit codes:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -676,8 +677,15 @@ class ModelClient:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.provider = provider
 
-    async def chat(self, prompt: str, timeout: float = 120.0) -> str:
-        """Send a single prompt and return the assistant response text."""
+    async def chat(self, prompt: str, timeout: float = 120.0, max_retries: int = 3) -> str:
+        """Send a single prompt and return the assistant response text.
+
+        Retries on transient failures (timeouts, connection/read/write errors,
+        5xx responses) with exponential backoff. Every raised error message
+        names the concrete failure (exception type + detail or HTTP status),
+        so a swallowed/empty exception is never silently recorded as a bare
+        "Execution error: " — the harness bug that masked the 3A test.
+        """
         headers = {
             "Content-Type": "application/json",
         }
@@ -693,24 +701,53 @@ class ModelClient:
             "max_tokens": 4096,
         }
 
-        start = time.monotonic()
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(f"{self.base_url}/chat/completions", json=payload, headers=headers)
+        last_error = "unknown error"
+        for attempt in range(1, max_retries + 1):
+            start = time.monotonic()
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        f"{self.base_url}/chat/completions", json=payload, headers=headers
+                    )
+            except httpx.TransportError as exc:
+                # Transient network failure (timeout / connect / read / write).
+                last_error = f"{type(exc).__name__}: {exc or 'transient network failure'}"
+                if attempt < max_retries:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+                raise RuntimeError(
+                    f"Model API request failed after {max_retries} attempts: {last_error}"
+                ) from exc
 
-        elapsed = time.monotonic() - start
+            # 5xx is transient — retry; other non-200 (4xx auth/config) fail fast.
+            if 500 <= resp.status_code < 600:
+                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                if attempt < max_retries:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+                    continue
+                raise RuntimeError(
+                    f"Model API returned HTTP {resp.status_code} after {max_retries} attempts: {resp.text[:300]}"
+                )
 
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Model API returned HTTP {resp.status_code}: {resp.text[:300]}"
-            )
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"Model API returned HTTP {resp.status_code}: {resp.text[:300]}"
+                )
 
-        data = resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise RuntimeError(f"No choices in model response: {data}")
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Model API returned a non-JSON body ({type(exc).__name__}): {resp.text[:300]}"
+                ) from exc
 
-        content = choices[0].get("message", {}).get("content", "")
-        return content
+            choices = data.get("choices", [])
+            if not choices:
+                raise RuntimeError(f"No choices in model response: {data}")
+
+            return choices[0].get("message", {}).get("content", "")
+
+        raise RuntimeError(f"Model API request failed: {last_error}")
 
 
 # ---------------------------------------------------------------------------
@@ -778,10 +815,10 @@ class PolygraphRunner:
                     score=-1.0,
                     status=TestStatus.ERROR.value,
                     pass_threshold=test_def.pass_threshold,
-                    notes=f"Execution error: {exc}",
+                    notes=f"Execution error ({type(exc).__name__}): {exc or exc.__class__.__name__}",
                 )
                 self.report.results.append(result)
-                print(f"  [{idx+1}/{len(self.test_ids)}] {test_id} ERROR — {exc}")
+                print(f"  [{idx+1}/{len(self.test_ids)}] {test_id} ERROR — {type(exc).__name__}: {exc}")
                 continue
 
             # Score the response
