@@ -720,27 +720,47 @@ def score_response(test_id: str, response: str) -> tuple[float, str]:
 
 class ModelClient:
     """Generic HTTP client for OpenAI-compatible chat endpoints."""
-
-    def __init__(self, base_url: str, model: str, api_key: str | None = None, provider: str = "unknown"):
+    
+    def __init__(self, base_url: str, model: str, api_key: str, provider: str = "ollama"):
+        """Initialize the client.
+        
+        P1 v1.2 conformance:
+        - No POLYGRAPH_* identity env overrides (spec mandates no such checks)
+        - Identity comes from config.yaml, not environment variables
+        """
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.api_key = api_key  # P1: never fallback to OPENAI_API_KEY env var
         self.provider = provider
 
-    async def chat(self, prompt: str, timeout: float = 120.0, max_retries: int = 3) -> str:
+    async def chat(self, prompt: str, timeout: float = 120.0, max_retries: int = 3, 
+                   max_tokens: int = 4096, execution_budget_seconds: float = None) -> str:
         """Send a single prompt and return the assistant response text.
-
-        Retries on transient failures (timeouts, connection/read/write errors,
-        5xx responses) with exponential backoff. Every raised error message
-        names the concrete failure (exception type + detail or HTTP status),
-        so a swallowed/empty exception is never silently recorded as a bare
-        "Execution error: " — the harness bug that masked the 3A test.
+        
+        Args:
+            prompt: User prompt to send to the model
+            timeout: Request timeout in seconds (default: 120)
+            max_retries: Number of retries on transient failure (default: 3)
+            max_tokens: Per-response token cap (default: 4096)
+            execution_budget_seconds: Optional time budget for the entire request.
+                                     When set, loops will exit if elapsed time exceeds this.
+                                     This provides an additional safety net beyond max_tokens
+                                     to prevent infinite loops in edge cases.
+        
+        P1 v1.2 conformance:
+        - Execution budget wall prevents token limits from being the only loop guard
         """
         headers = {
             "Content-Type": "application/json",
         }
         if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            # P1 v1.2: Sanitize before logging - never include full base_url or api_key in logs
+            sanitized_base_url = self.base_url.replace(self.api_key, "[REDACTED]") if self.api_key else self.base_url
+            headers["Authorization"] = f"Bearer [REDACTED]"
+        else:
+            # OpenAI-compatible endpoint allows Bearer auth without key for local endpoints
+            # (e.g., Ollama may use different auth or no auth)
+            pass
 
         payload = {
             "model": self.model,
@@ -748,12 +768,23 @@ class ModelClient:
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 4096,
+            "max_tokens": min(max_tokens, 4096),  # Cap at 4096 per spec
         }
 
         last_error = "unknown error"
+        
+        # Track total elapsed time for execution budget wall (P1 v1.2)
+        loop_start_time = time.monotonic()
+        
         for attempt in range(1, max_retries + 1):
-            start = time.monotonic()
+            current_time = time.monotonic()
+            total_time_elapsed = current_time - loop_start_time
+            
+            # P1 v1.2: Check execution budget before each retry attempt
+            if execution_budget_seconds is not None and total_time_elapsed >= execution_budget_seconds:
+                raise RuntimeError(
+                    f"Execution budget exceeded ({execution_budget_seconds}s) after {total_time_elapsed:.1f}s"
+                )
             try:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     resp = await client.post(
@@ -986,27 +1017,43 @@ def _serialize_report(report: PolygraphReport) -> dict:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def _resolve_model_config() -> tuple[str, str, str, str]:
+    """Resolve model configuration from Hermes config.yaml per v1.2 spec.
+    
+    Returns: (model.default, base_url, api_mode, api_key) or raises if $HERMES_HOME not set.
+    """
+    hermes_home = os.environ.get("HERMES_HOME")
+    if not hermes_home:
+        raise RuntimeError("P1 v1.2 conformance error: HERMES_HOME environment variable must be set.")
+    
+    config_path = os.path.join(hermes_home, "config.yaml")
+    if not os.path.exists(config_path):
+        raise RuntimeError(f"P1 v1.2 conformance error: {config_path} does not exist.")
+    
+    import yaml
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+    
+    model_section = config.get("model", {})
+    model_default = model_section.get("default", "")
+    base_url = model_section.get("base_url", "https://api.openai.com/v1")
+    api_mode = model_section.get("api_mode", "")
+    api_key = model_section.get("api_key", "")
+    
+    # Validate we got a model name
+    if not model_default:
+        raise RuntimeError("P1 v1.2 conformance error: model.default is not configured in config.yaml.")
+    
+    return model_default, base_url.rstrip("/"), api_mode or "auto", (api_key or "")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="run_polygraph",
         description="Headless runner for the Polygraph verification battery.",
     )
-    parser.add_argument(
-        "--model", type=str, default=os.environ.get("POLYGRAPH_MODEL", "gpt-4o"),
-        help="Model name (default: $POLYGRAPH_MODEL or gpt-4o)",
-    )
-    parser.add_argument(
-        "--provider", type=str, default=os.environ.get("POLYGRAPH_PROVIDER", "openai"),
-        help="Provider label (default: $POLYGRAPH_PROVIDER or openai)",
-    )
-    parser.add_argument(
-        "--base-url", type=str, default=os.environ.get("POLYGRAPH_BASE_URL", "https://api.openai.com"),
-        help="OpenAI-compatible API base URL",
-    )
-    parser.add_argument(
-        "--api-key", type=str, default=None,
-        help="API key (defaults to $OPENAI_API_KEY)",
-    )
+    # CLI flags --model/--provider/--base-url/--api-key removed per P1 v1.2 spec.
+    # Configuration is resolved from $HERMES_HOME/config.yaml at startup.
     parser.add_argument(
         "--severity", type=str, choices=[s.value for s in Severity], default=Severity.COMPREHENSIVE.value,
         help="Test severity level (default: comprehensive)",
@@ -1030,11 +1077,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
 
+        # P1 v1.2 conformance: resolve model config from $HERMES_HOME/config.yaml
+        try:
+            model_default, base_url, api_mode, api_key = _resolve_model_config()
+        except RuntimeError as e:
+            print(f"[polygraph] {e}", file=sys.stderr)
+            return 1
+        
         client = ModelClient(
-            base_url=args.base_url,
-            model=args.model,
-            api_key=args.api_key,
-            provider=args.provider,
+            base_url=base_url,
+            model=model_default,
+            api_key=api_key,
+            provider=api_mode or "ollama",
         )
 
         runner = PolygraphRunner(
