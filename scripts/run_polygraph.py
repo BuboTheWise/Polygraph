@@ -680,8 +680,9 @@ class ModelClient:
         """Send a single prompt and return the assistant response text."""
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         payload = {
             "model": self.model,
@@ -694,7 +695,7 @@ class ModelClient:
 
         start = time.monotonic()
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(f"{self.base_url}/v1/chat/completions", json=payload, headers=headers)
+            resp = await client.post(f"{self.base_url}/chat/completions", json=payload, headers=headers)
 
         elapsed = time.monotonic() - start
 

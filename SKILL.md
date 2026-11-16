@@ -1,7 +1,7 @@
 ---
 name: polygraph
 description: "Model verification battery: empirical capability checks from execution evidence."
-version: 0.1.0
+version: 0.1.2
 author: BuboTheWise, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -21,21 +21,18 @@ Use it after provider or deployment changes, or whenever suspicious behavior is 
 ```bash
 pip install httpx   # one-time dependency
 
-# Runner default severity: comprehensive (~20+ tests, ~15 min)
-python3 scripts/run_polygraph.py \
-  --model <model-name> \
-  --base-url <openai-compatible-endpoint> \
-  --api-key <key> \
-  --output polygraph-report.json
+# Runs under the active Hermes profile: that profile's configured model is the model under test.
+# No --model / --base-url / --api-key flags — Polygraph has no model selection of its own (Operating Model, README).
+python3 scripts/run_polygraph.py --severity comprehensive --output polygraph-report.json
 
 # Severity levels: critical (~8 tests), balanced (~15), comprehensive (default), exhaustive (all)
-python3 scripts/run_polygraph.py --severity critical --model <m> --base-url <url>
+python3 scripts/run_polygraph.py --severity critical
 
 # Specific tests only
-python3 scripts/run_polygraph.py --tests 1A,3B,11D --model <m> --base-url <url>
+python3 scripts/run_polygraph.py --tests 1A,3B,11D
 ```
 
-Flags: `--severity`, `--model`, `--base-url`, `--api-key` (defaults to `$OPENAI_API_KEY`), `--provider`, `--output` (JSON report path), `--no-tools` (skip tool-requiring tests), `--tests` (comma-separated test IDs).
+Flags: `--severity`, `--output` (JSON report path), `--no-tools` (skip tool-requiring tests), `--tests` (comma-separated test IDs), `--max-tokens` (per-response cap, default 4096 — a run parameter, **not** identity). Model/provider/endpoint are **not flags** — they come from the active profile's Hermes config (Operating Model, README).
 
 ## Exit codes
 
@@ -57,4 +54,7 @@ Flags: `--severity`, `--model`, `--base-url`, `--api-key` (defaults to `$OPENAI_
 ## Notes
 
 - README quick-start shows a bare `run_polygraph.py` as "critical profile"; the CLI default in code is **comprehensive**. Pass `--severity` explicitly when it matters.
-- Provider chain in config is ordered failover (first responding provider wins, no mid-battery switching); the CLI `--base-url`/`--model` override it directly.
+- **Profile-inherent model (v1.1/v1.2):** the model under test is the active profile's configured model. No provider chain, no endpoint selection — Polygraph verifies the model a profile is running, not a model it picks.
+- **Resolution (v1.2):** the runner reads the active profile's top-level `model:` block (`model.default`, `model.base_url`, `model.api_mode`) from `$HERMES_HOME/config.yaml`. It must not carry, detect, or guess model/endpoint/provider. `providers:`/`provider_chain` are superseded (reference only).
+- **Response cap (v1.2):** `max_tokens` is a named run parameter (`--max-tokens`, default 4096), a per-response generation cap — distinct from the profile's `context_length`.
+- **Workflow rules (v1.2, normative):** (1) run-and-report is not development — do not edit the runner unless development is explicitly requested; (2) verify before you report — a success claim needs evidence covering the scope claimed.
