@@ -232,7 +232,7 @@ reports:
 # This block documents every configurable default so someone reading the file
 # understands what happens without customizing. Keep it in sync with actual defaults.
 _defaults_summary: |
-  Profile:       critical (fastest run). Override with --profile flag.
+  Profile:       critical (fastest run). Use --severity flag instead.
   Provider kind: first available from provider_chain (env-driven fallback).
   Model:         qwen3.6:27b via OpenAI-compatible endpoint at 127.0.0.1:11434/v1.
   Temperature:   0.3 (low, for deterministic answers).
