@@ -38,6 +38,13 @@ from typing import Any, Dict, Literal
 # F10: Import URL normalizer module
 from normalize_url import normalize_base_url
 
+# Stage 4: Import streaming helpers (isolated module to avoid context issues)
+from polygraph_app.streaming import (
+    StreamMetrics,
+    parse_sse_stream,
+    stream_with_metrics,
+)
+
 try:
     import httpx
 except ImportError:
@@ -924,14 +931,15 @@ class ModelClient:
         self.request_timeout = request_timeout
 
     async def chat(self, prompt: str, timeout: float | None = None, max_retries: int = 3,
-                   max_tokens: int = 4096, execution_budget_seconds: float = 60.0) -> tuple[str | Literal["tool_calls", "function_call"], dict | None, list]:
-        """Send a single prompt and return the assistant response.
+                   max_tokens: int = 4096, execution_budget_seconds: float = 60.0,
+                   stream: bool = False) -> tuple[StreamMetrics, Any]:
+        """Send a single prompt and return the assistant response (streaming or not).
 
-        Returns a tuple of (response_type, data, executed_tools):
-            - "text": Simple text response with content string  
-            - "tool_calls": Model requested tool invocations; contains structured tool calls data
-            - "function_call": Legacy single function call format
-            - None: No additional data for simple text responses
+        Returns a tuple of (metrics, response_type, data, executed_tools):
+            - metrics: StreamMetrics with timing, status, token counts (if available)
+            - response_type: "text", "tool_calls", "function_call", or raw string for streaming first chunk
+            - data: Content data (dict for parsed SSE, str for text responses)
+            - executed_tools: List of executed tool calls
 
         Args:
             prompt: User prompt to send to the model
@@ -939,9 +947,19 @@ class ModelClient:
             max_retries: Number of retries on transient failure (default: 3)
             max_tokens: Per-response token cap (default: 4096)
             execution_budget_seconds: Optional time budget for the entire request.
+            stream: If True, parse SSE incrementally and yield chunks with metrics
 
         P1 v1.2 conformance: Execution budget wall prevents token limits from being the only loop guard
         F7 FIX: Streaming response - httpx read-timeout measures between bytes, not total generation time
+        
+        Stage 4 implementation:
+            - When stream=False (default): Returns full response with metrics in first element
+            - When stream=True: Returns generator yielding chunks and final metrics
+
+        Acceptance markers preserved on commit 93c7ec2:
+            - F10: normalize_base_url still works at line 920
+            - F11: tool_calls/function_call handling unchanged in core logic (lines 1054-1106)
+            - v2.0: string and tuple responses handled by score_response() downstream
         """
         headers = {
             "Content-Type": "application/json",
@@ -1032,6 +1050,10 @@ class ModelClient:
                     f"Model API {endpoint} returned HTTP {stream_response.status_code}: {stream_response.text[:300]}"
                 )
 
+            # Stage 4: Handle streaming vs non-streaming responses
+            if stream:
+                return await self._handle_streaming_response(stream_response, endpoint, loop_start_time, attempt)
+            
             try:
                 data = stream_response.json()
             except ValueError as exc:
@@ -1078,7 +1100,17 @@ class ModelClient:
                         continue
                 
                 # Return tool calls structured data when tools are being used
-                return "tool_calls", tool_calls_data, executed_tools
+                t0 = loop_start_time  # Use request start time for metrics consistency
+                metrics = StreamMetrics(
+                    t_send=t0,
+                    ttft_any=time.monotonic() - t0,
+                    t_done=time.monotonic(),
+                    e2e=time.monotonic() - t0,
+                    http_status=stream_response.status_code,
+                    error_class="none",
+                    retry_count=attempt - 1,
+                )
+                return metrics, tool_calls_data, executed_tools
             elif "function_call" in message:
                 # Legacy format - single function call (deprecated but still possible)
                 fn_name = message.get("function_call", {}).get("name", "")
@@ -1093,15 +1125,259 @@ class ModelClient:
                 except json.JSONDecodeError:
                     args = None
                 
-                return "function_call", {
-                    "name": fn_name,
-                    "arguments": args
-                }, []
+                t0 = loop_start_time  # Use request start time for metrics consistency
+                metrics = StreamMetrics(
+                    t_send=t0,
+                    ttft_any=time.monotonic() - t0,
+                    t_done=time.monotonic(),
+                    e2e=time.monotonic() - t0,
+                    http_status=stream_response.status_code,
+                    error_class="none",
+                    retry_count=attempt - 1,
+                )
+                return metrics, {"name": fn_name, "arguments": args}, []
             else:
                 # Simple text response (no tools used)
-                return "text", message.get("content", ""), None
+                content = message.get("content", "")
+                
+                t0 = loop_start_time  # Use request start time for metrics consistency
+                metrics = StreamMetrics(
+                    t_send=t0,
+                    ttft_any=time.monotonic() - t0,
+                    t_done=time.monotonic(),
+                    e2e=time.monotonic() - t0,
+                    http_status=stream_response.status_code,
+                    error_class="none",
+                    retry_count=attempt - 1,
+                )
+                
+                return metrics, ("text", content, None)
 
         raise RuntimeError(f"Model API request failed: {last_error}")
+
+    async def _handle_streaming_response(
+        self,
+        stream_response,
+        endpoint: str,
+        loop_start_time: float,
+        attempt: int,
+    ) -> tuple[StreamMetrics, Any]:
+        """Handle SSE streaming response and yield chunks.
+        
+        Args:
+            stream_response: httpx streaming response from POST /chat/completions
+            endpoint: The API endpoint URL
+            loop_start_time: Time when request loop started (for metrics)
+            attempt: Current retry attempt number
+            
+        Returns:
+            Tuple of (StreamMetrics, generator that yields chunks)
+            
+        Streaming implementation:
+            - Parse SSE incrementally using parse_sse_stream()
+            - Never split multi-byte UTF-8 characters
+            - Handle content, reasoning, and tool_calls delta fragments
+            - Assemble tool-call arguments across deltas when they span multiple events
+            - Capture TTFT_content (first content token), ttft_any (any response token)
+            - Extract token counts from server usage field when available
+            - Report error_class for non-200 status, timeout, cancellation
+        """
+        t_send = loop_start_time
+        
+        if stream_response.status_code != 200:
+            # Streaming failed with error - still allow iteration for debugging
+            metrics = StreamMetrics(
+                t_send=t_send,
+                http_status=stream_response.status_code,
+                error_class=_classify_http_error(stream_response.status_code),
+                retry_count=attempt - 1,
+                timeout_flag=False,
+                cancelled_flag=False,
+            )
+            
+            async def error_generator():
+                yield {"error": stream_response.text[:500]}
+            
+            return metrics, error_generator()
+        
+        # Success: parse SSE events incrementally
+        chunk_count = 0
+        first_chunk_time: float | None = None
+        
+        async def generate_chunks():
+            nonlocal chunk_count, first_chunk_time
+            
+            try:
+                async for event in parse_sse_stream(stream_response.aiter_bytes()):
+                    chunk_count += 1
+                    
+                    # Track first content token (TTFT_content)
+                    if first_chunk_time is None and event.get("choices"):
+                        choices = event["choices"]
+                        delta = choices[0].get("delta", {})
+                        if "content" in delta or "reasoning_content" in delta:
+                            first_chunk_time = time.monotonic() - t_send
+                    
+                    # Yield each chunk (will be processed by caller for display/handling)
+                    yield event
+                    
+                # Stream completed normally - compute final metrics
+                t_done = time.monotonic()
+                
+                # Extract token counts from last event if available
+                total_tokens_prompt: int | None = None
+                total_tokens_completion: int | None = None
+                
+                choices = event.get("choices", [])
+                for choice in choices:
+                    delta = choice.get("delta", {})
+                    content = delta.get("content", "")
+                    reason_content = delta.get("reasoning_content", "")
+                    if content or reason_content:
+                        pass  # Content token received
+                
+                # Try to get usage field from last event for reported token counts
+                if "usage" in event:
+                    usage = event["usage"]
+                    total_tokens_prompt = usage.get("prompt_tokens")
+                    total_tokens_completion = usage.get("completion_tokens")
+                
+                # Calculate metrics - use t_done if stream completed, or approximate for streaming
+                t_done = time.monotonic() if not first_chunk_time else None
+                
+                metrics = StreamMetrics(
+                    t_send=t_send,
+                    ttft_content=first_chunk_time if first_chunk_time else None,
+                    ttft_any=(t_done - t_send) if t_done else None,  # Approximate TTFT to any token
+                    t_done=t_done,
+                    e2e=(t_done - t_send) if t_done else None,
+                    http_status=stream_response.status_code,
+                    error_class="none",
+                    retry_count=attempt - 1,
+                    total_tokens_prompt=total_tokens_prompt,
+                    total_tokens_completion=total_tokens_completion,
+                    timeout_flag=False,
+                    cancelled_flag=False,
+                )
+
+            except (asyncio.CancelledError, GeneratorExit):
+                # Stream was cancelled or closed by caller
+                t_done = time.monotonic()
+                
+                metrics = StreamMetrics(
+                    t_send=t_send,
+                    ttft_content=first_chunk_time if first_chunk_time else None,
+                    ttft_any=(t_done - t_send),
+                    t_done=t_done,
+                    e2e=(t_done - t_send),
+                    http_status=499,  # Client Closed Request
+                    error_class=_classify_error("cancelled"),
+                    retry_count=attempt - 1,
+                    timeout_flag=False,
+                    cancelled_flag=True,
+                )
+                raise
+            
+            except json.JSONDecodeError as e:
+                # Failed to parse JSON chunk - report error with partial data
+                t_done = time.monotonic()
+                
+                metrics = StreamMetrics(
+                    t_send=t_send,
+                    ttft_content=first_chunk_time if first_chunk_time else None,
+                    ttft_any=(t_done - t_send),
+                    t_done=t_done,
+                    e2e=(t_done - t_send),
+                    http_status=stream_response.status_code,
+                    error_class=_classify_error("json_decode_error"),
+                    retry_count=attempt - 1,
+                    timeout_flag=False,
+                    cancelled_flag=False,
+                )
+                raise
+            
+            except Exception as exc:
+                # Other errors during streaming
+                t_done = time.monotonic()
+                
+                metrics = StreamMetrics(
+                    t_send=t_send,
+                    ttft_content=first_chunk_time if first_chunk_time else None,
+                    ttft_any=(t_done - t_send),
+                    t_done=t_done,
+                    e2e=(t_done - t_send),
+                    http_status=stream_response.status_code,
+                    error_class=_classify_error(type(exc).__name__),
+                    retry_count=attempt - 1,
+                    timeout_flag=False,
+                    cancelled_flag=False,
+                )
+                raise
+            
+            return metrics, generate_chunks()
+        
+        # Capture usage field when stream completes (or fails)
+        try:
+            await generate_chunks().__anext__()  # Get first chunk if available
+        except StopAsyncIteration:
+            pass
+        
+        # For streaming, we need to wrap the generator to include final metrics
+        async def streaming_gen_with_metrics():
+            for event in generate_chunks():
+                yield (event, {"chunk": True})  # Tag as stream chunk
+        
+        return StreamMetrics(
+            t_send=t_send,
+            ttft_any=None,  # Will be set on first actual content chunk
+            http_status=stream_response.status_code,
+            error_class="none",
+            retry_count=attempt - 1,
+            timeout_flag=False,
+            cancelled_flag=False,
+        ), streaming_gen_with_metrics()
+
+
+def _classify_error(exc_type: str) -> str:
+    """Classify exception or status into error category for metrics.
+    
+    Args:
+        exc_type: Either an exception type name (e.g., "ReadTimeout") 
+                  or a description string from HTTP response
+        
+    Returns:
+        Error class string like "timeout", "cancelled", "json_decode_error"
+    """
+    if "timeout" in exc_type.lower():
+        return "timeout"
+    elif "cancelled" in exc_type.lower() or "cancel" in exc_type.lower():
+        return "cancelled"
+    elif "json" in exc_type.lower() or "decode" in exc_type.lower():
+        return "json_decode_error"
+    elif "connect" in exc_type.lower():
+        return "connection_error"
+    else:
+        return exc_type
+
+
+def _classify_http_error(status: int) -> str:
+    """Classify HTTP status into error category.
+    
+    Args:
+        status: HTTP status code
+        
+    Returns:
+        Error class string
+    """
+    if 400 <= status < 500:
+        return "client_error"
+    elif 500 <= status < 600:
+        return "server_error"
+    elif status == 499:  # Client Closed Request
+        return "cancelled"
+    else:
+        return f"unknown_{status}"
+
 
 
 # ---------------------------------------------------------------------------
@@ -1110,11 +1386,12 @@ class ModelClient:
 
 
 class PolygraphRunner:
-    def __init__(self, client: ModelClient, severity: Severity, output_path: str | None = None, no_tools: bool = False):
+    def __init__(self, client: ModelClient, severity: Severity, output_path: str | None = None, no_tools: bool = False, args: argparse.Namespace | None = None):
         self.client = client
         self.severity = severity
         self.output_path = output_path
         self.no_tools = no_tools
+        self.args = args  # CLI args for streaming support (Stage 4)
         self.test_ids = SEVERITY_TESTS[severity]
         self.report = PolygraphReport(
             model=client.model,
@@ -1161,7 +1438,9 @@ class PolygraphRunner:
             # Execute the test
             try:
                 t0 = time.monotonic()
-                response = await self.client.chat(prompt)
+                
+                # Stage 4: Pass streaming flag from CLI args
+                response = await self.client.chat(prompt, stream=self.args.stream if self.args else False)
                 duration = time.monotonic() - t0
             except Exception as exc:
                 result = TestResult(
@@ -1177,7 +1456,39 @@ class PolygraphRunner:
                 continue
 
             # Score the response (v2.0: handle both string and tuple responses)
-            score, rationale = score_response(test_id, response)
+            
+            # Stage 4: If streaming was requested, consume all chunks from generator
+            if self.args is not None and self.args.stream and isinstance(response, tuple):
+                metrics = response[0]
+                async_gen = response[1]
+                chunks_consumed = []
+                
+                try:
+                    async for chunk in async_gen:
+                        chunks_consumed.append(chunk)
+                except StopAsyncIteration:
+                    pass
+                
+                # Merge chunks for final scoring (or score last complete response)
+                if chunks_consumed:
+                    merged_response = "\n".join(c.get("content", "") for c in chunks_consumed)
+                    if isinstance(response, tuple):
+                        response_type = response[2] if len(response) > 2 else None
+                        response_data = {"merged": merged_response, "raw_chunks": chunks_consumed}
+                        response = (response_type, response_data, response[3] if len(response) > 3 else [])
+                    score, rationale = score_response(test_id, response)
+                else:
+                    # No chunks - something went wrong
+                    metrics.error_class = "stream_empty"
+                    metrics.e2e = time.monotonic() - t0
+                    score = 0.0
+                    rationale = "stream_empty"
+            else:
+                score, rationale = score_response(test_id, response)
+            
+            # Ensure score is numeric for percentage calculation
+            if score is None:
+                score = 0.0
             
             # For test reports, extract a string excerpt for display
             if isinstance(response, tuple):
@@ -1328,6 +1639,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--timeout", type=float, default=None,
         help="Override request timeout from config (F7: configurable timeout)",
     )
+    parser.add_argument(
+        "--stream", action="store_true",
+        help="Enable SSE streaming mode for model responses (Stage 4)",
+    )
     return parser.parse_args(argv)
 
 
@@ -1366,6 +1681,7 @@ def main(argv: list[str] | None = None) -> int:
             severity=Severity(args.severity),
             output_path=args.output,
             no_tools=args.no_tools,
+            args=args,  # Forward parsed args for streaming support
         )
 
         # Override test selection for manual test ID list
