@@ -1220,8 +1220,11 @@ class ModelClient:
                     
                     # Yield each chunk (will be processed by caller for display/handling)
                     yield event
-                    
-                # Stream completed normally - compute final metrics
+                
+                # Stream completed normally - yield sentinel and compute final metrics
+                yield {"__stream_complete": True}
+                
+                # Calculate metrics - use t_done if stream completed, or approximate for streaming
                 t_done = time.monotonic()
                 
                 # Extract token counts from last event if available
@@ -1260,8 +1263,8 @@ class ModelClient:
                     cancelled_flag=False,
                 )
 
-            except (asyncio.CancelledError, GeneratorExit):
-                # Stream was cancelled or closed by caller
+            except asyncio.CancelledError:
+                # Stream was cancelled - emit error event and stop
                 t_done = time.monotonic()
                 
                 metrics = StreamMetrics(
@@ -1276,10 +1279,11 @@ class ModelClient:
                     timeout_flag=False,
                     cancelled_flag=True,
                 )
+                
                 raise
             
-            except json.JSONDecodeError as e:
-                # Failed to parse JSON chunk - report error with partial data
+            except GeneratorExit:
+                # Generator was explicitly closed - stop gracefully
                 t_done = time.monotonic()
                 
                 metrics = StreamMetrics(
@@ -1288,16 +1292,17 @@ class ModelClient:
                     ttft_any=(t_done - t_send),
                     t_done=t_done,
                     e2e=(t_done - t_send),
-                    http_status=stream_response.status_code,
-                    error_class=_classify_error("json_decode_error"),
+                    http_status=499,  # Generator closed
+                    error_class="cancelled",
                     retry_count=attempt - 1,
                     timeout_flag=False,
-                    cancelled_flag=False,
+                    cancelled_flag=True,
                 )
+                
                 raise
             
             except Exception as exc:
-                # Other errors during streaming
+                # Catch-all for other streaming errors
                 t_done = time.monotonic()
                 
                 metrics = StreamMetrics(
@@ -1306,36 +1311,33 @@ class ModelClient:
                     ttft_any=(t_done - t_send),
                     t_done=t_done,
                     e2e=(t_done - t_send),
-                    http_status=stream_response.status_code,
+                    http_status=500,  # Internal server error
                     error_class=_classify_error(type(exc).__name__),
                     retry_count=attempt - 1,
                     timeout_flag=False,
                     cancelled_flag=False,
                 )
+                
                 raise
-            
-            return metrics, generate_chunks()
-        
-        # Capture usage field when stream completes (or fails)
-        try:
-            await generate_chunks().__anext__()  # Get first chunk if available
-        except StopAsyncIteration:
-            pass
-        
-        # For streaming, we need to wrap the generator to include final metrics
-        async def streaming_gen_with_metrics():
-            for event in generate_chunks():
-                yield (event, {"chunk": True})  # Tag as stream chunk
-        
-        return StreamMetrics(
-            t_send=t_send,
-            ttft_any=None,  # Will be set on first actual content chunk
-            http_status=stream_response.status_code,
-            error_class="none",
-            retry_count=attempt - 1,
-            timeout_flag=False,
-            cancelled_flag=False,
-        ), streaming_gen_with_metrics()
+
+            finally:
+                # Clean up after completion or cancellation
+                t_done = time.monotonic()
+                metrics = StreamMetrics(
+                    t_send=t_send,
+                    ttft_content=first_chunk_time if first_chunk_time else None,
+                    ttft_any=(t_done - t_send),
+                    t_done=t_done,
+                    e2e=(t_done - t_send) or None,
+                    http_status=stream_response.status_code,
+                    error_class="none",
+                    retry_count=attempt - 1,
+                    total_tokens_prompt=None,
+                    total_tokens_completion=None,
+                    timeout_flag=False,
+                    cancelled_flag=False,
+                )
+
 
 
 def _classify_error(exc_type: str) -> str:
@@ -1643,6 +1645,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stream", action="store_true",
         help="Enable SSE streaming mode for model responses (Stage 4)",
     )
+    parser.add_argument(
+        "--concurrency", type=int, choices=[1, 2, 4, 6], default=1,
+        dest="concurrency_level",
+        help="Run tests with N parallel workers (F9: concurrency harness, levels: 1,2,4,6)",
+    )
+    parser.add_argument(
+        "--duration", type=float, default=None,
+        dest="duration_seconds",
+        help="Maximum duration for each level in seconds (closed-loop mode)",
+    )
+    parser.add_argument(
+        "--prompts", type=str, default=None,
+        help="Comma-separated prompt templates to mix with suite prompts",
+    )
     return parser.parse_args(argv)
 
 
@@ -1693,11 +1709,51 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             runner.test_ids = ids
             runner.report.test_ids = ids
+        
+        # If concurrency requested, run with parallel workers instead of sequential
+        if args.concurrency_level and args.concurrency_level > 1:
+            print(f"\n[concurrency] Running at {args.concurrency_level}-worker mode")
+            
+            import asyncio
+            from polygraph_app.concurrency import ConcurrencyHarness, RequestMetrics
+            
+            # Create concurrency harness
+            harness = ConcurrencyHarness(
+                client=client,
+                test_fn=lambda prompt_id: _streaming_test_fn(prompt_id),  # Use streaming with metrics
+                num_requests=len(args.test_ids) if args.tests else len(SEVERITY_TESTS[severity]),
+                concurrency_levels=[args.concurrency_level],
+                duration_seconds=args.duration_seconds,
+            )
+            
+            # Run harness and get level metrics
+            # Run harness and get level metrics
+            async def run_concurrent():
+                return await harness.run()
+            
+            level_metrics = asyncio.get_event_loop().run_until_complete(run_concurrent())
+            
+            if level_metrics:
+                # Collect and report per-level statistics
+                for m in level_metrics:
+                    print(f"\n=== Level {m.level} Metrics ===")
+                    print(f"  Samples: {m.n}")
+                    p50 = m.ttft_stats.get('t_first_token_p50') if m.ttft_stats else None
+                    e2e_n = m.e2e_stats.get('t_first_token_count', 0) if m.e2e_stats else 0
+                    p95 = f"N/A (insufficient samples)" if e2e_n < 20 else m.ttft_stats.get('t_first_token_p95') if m.ttft_stats and p50 else None
+                    print(f"  TTFT p50/p95: {p50}/{p95}")
+                    e2e_p50 = m.e2e_stats.get('e2e_p50') if m.e2e_stats else None
+                    e2e_n2 = m.e2e_stats.get('e2e_count', 0) if m.e2e_stats else 0
+                    e2e_p95 = f"N/A (insufficient samples)" if e2e_n2 < 20 else m.e2e_stats.get('e2e_p95') if m.e2e_stats and e2e_p50 else None
+                    print(f"  E2E p50/p95: {e2e_p50}/{e2e_p95}")
+                    print(f"  Error rate: {m.error_rate:.2%}")
+                    print(f"  Timeout rate: {m.timeout_rate:.2%}")
 
-        import asyncio
-        exit_code = asyncio.run(runner.run())
-        return exit_code
 
+        else:  # Sequential mode (concurrency_level == 1 or not set)
+            exit_code = asyncio.run(runner.run())
+            return exit_code
+    
     except KeyboardInterrupt:
         print("\n[polygraph] Interrupted by user", file=sys.stderr)
         return 3
