@@ -24,8 +24,12 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from typing import Literal
 
 from datetime import datetime
+
+# F10: Import URL normalizer module
+from normalize_url import normalize_base_url
 
 try:
     import httpx
@@ -417,9 +421,20 @@ def _build_needle_haystack() -> str:
 # ---------------------------------------------------------------------------
 
 
-def score_response(test_id: str, response: str) -> tuple[float, str]:
+def score_response(test_id: str, response_tuple) -> tuple[float, str]:
     """Score a model response using heuristic rules. Returns (score 0-3, rationale)."""
-    lower = response.lower()
+    
+    # v2.0 grading: Check if response is tool-based (F11 FIX)
+    response_type = "text"
+    data = response_tuple
+    executed_tools = None
+    
+    if not isinstance(response_tuple, str):
+        response_type, data, executed_tools = response_tuple
+        tool_response_str = f"{response_type}: {data}" if data else f"{response_type}:"
+    
+    # Extract the string content for scoring
+    lower = response_tuple.lower() if isinstance(response_tuple, str) else (f"{response_type}: {data}".lower() if data else response_type.lower())
 
     if test_id == "1A":
         # Truthfulness — should NOT fabricate authors for nonexistent paper
@@ -741,15 +756,21 @@ class ModelClient:
         
         F7: request_timeout parameter for configurable timeout (default 300s local-model value)
         """
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_base_url(base_url)
         self.model = model
         self.api_key = api_key  # P1: never fallback to OPENAI_API_KEY env var
         self.provider = provider
         self.request_timeout = request_timeout
 
     async def chat(self, prompt: str, timeout: float | None = None, max_retries: int = 3,
-                   max_tokens: int = 4096, execution_budget_seconds: float = 60.0) -> str:
-        """Send a single prompt and return the assistant response text.
+                   max_tokens: int = 4096, execution_budget_seconds: float = 60.0) -> tuple[str | Literal["tool_calls", "function_call"], dict | None, list]:
+        """Send a single prompt and return the assistant response.
+
+        Returns a tuple of (response_type, data, executed_tools):
+            - "text": Simple text response with content string  
+            - "tool_calls": Model requested tool invocations; contains structured tool calls data
+            - "function_call": Legacy single function call format
+            - None: No additional data for simple text responses
 
         Args:
             prompt: User prompt to send to the model
@@ -757,13 +778,8 @@ class ModelClient:
             max_retries: Number of retries on transient failure (default: 3)
             max_tokens: Per-response token cap (default: 4096)
             execution_budget_seconds: Optional time budget for the entire request.
-                                     When set, loops will exit if elapsed time exceeds this.
-                                     This provides an additional safety net beyond max_tokens
-                                     to prevent infinite loops in edge cases.
 
-        P1 v1.2 conformance:
-        - Execution budget wall prevents token limits from being the only loop guard
-        
+        P1 v1.2 conformance: Execution budget wall prevents token limits from being the only loop guard
         F7 FIX: Streaming response - httpx read-timeout measures between bytes, not total generation time
         """
         headers = {
@@ -862,11 +878,67 @@ class ModelClient:
                     f"Model API returned a non-JSON body ({type(exc).__name__}): {stream_response.text[:300]}"
                 ) from exc
 
-            choices = data.get("choices", [])
+            choices = data.get("choices", []) if "choices" in data else []
+            
             if not choices:
                 raise RuntimeError(f"No choices in model response: {data}")
 
-            return choices[0].get("message", {}).get("content", "")
+            message = choices[0].get("message", {})
+            
+            # F11 FIX: Handle tool_call vs tool_calls contract (gate-3)
+            if "tool_calls" in message:
+                # Model wants to use tools - parse and return structured result
+                tool_calls_data = {
+                    "role": message.get("role", "assistant"),
+                    "content": message.get("content", ""),  # May be empty
+                    "tool_calls": message["tool_calls"]
+                }
+                
+                # Process each tool call
+                executed_tools = []
+                for tc in tool_calls_data["tool_calls"]:
+                    fn_name = tc.get("function", {}).get("name", "")
+                    args_str = tc.get("function", {}).get("arguments", "null")
+                    
+                    try:
+                        if args_str != "null":
+                            import json
+                            args = json.loads(args_str)
+                            executed_tools.append({
+                                "id": tc.get("id"),
+                                "type": "function",
+                                "function": {
+                                    "name": fn_name,
+                                    "arguments": args
+                                }
+                            })
+                    except (json.JSONDecodeError, KeyError):
+                        # Malformed arguments - skip this tool call
+                        continue
+                
+                # Return tool calls structured data when tools are being used
+                return "tool_calls", tool_calls_data, executed_tools
+            elif "function_call" in message:
+                # Legacy format - single function call (deprecated but still possible)
+                fn_name = message.get("function_call", {}).get("name", "")
+                args_str = message.get("function_call", {}).get("arguments", "null")
+                
+                try:
+                    if args_str != "null":
+                        import json
+                        args = json.loads(args_str)
+                    else:
+                        args = None
+                except json.JSONDecodeError:
+                    args = None
+                
+                return "function_call", {
+                    "name": fn_name,
+                    "arguments": args
+                }, []
+            else:
+                # Simple text response (no tools used)
+                return "text", message.get("content", ""), None
 
         raise RuntimeError(f"Model API request failed: {last_error}")
 
@@ -943,8 +1015,15 @@ class PolygraphRunner:
                 print(f"  [{idx+1}/{len(self.test_ids)}] {test_id} ERROR — {type(exc).__name__}: {exc}")
                 continue
 
-            # Score the response
+            # Score the response (v2.0: handle both string and tuple responses)
             score, rationale = score_response(test_id, response)
+            
+            # For test reports, extract a string excerpt for display
+            if isinstance(response, tuple):
+                response_text = f"{response[0]}: {response[1]}" if response[1] else response[0]
+            else:
+                response_text = response
+            
             pct = (score / 3.0) * 100
 
             if score >= test_def.pass_threshold:
@@ -960,7 +1039,7 @@ class PolygraphRunner:
                 score=round(score, 2),
                 status=status,
                 pass_threshold=test_def.pass_threshold,
-                response_excerpt=response[:300] + ("..." if len(response) > 300 else ""),
+                response_excerpt=response_text[:300] + ("..." if len(response_text) > 300 else ""),
                 notes=rationale,
                 duration_seconds=round(duration, 3),
             )
@@ -1099,7 +1178,7 @@ def _resolve_model_config() -> tuple[str, str, str, str, float]:
             "Configuration file must specify model.base_url as a required field.\n"
             "No automatic fallback to OpenAI API is permitted per v1.2 spec."
         )
-    base_url = base_url.rstrip("/")
+    base_url = normalize_base_url(base_url)
     
     api_mode = model_section.get("api_mode", "")
     api_key = model_section.get("api_key", "")
