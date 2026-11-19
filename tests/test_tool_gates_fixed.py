@@ -17,8 +17,8 @@ import json
 import sys
 import os
 
-# Add fixtures to path
-sys.path.insert(0, "/home/stefan/.hermes/kanban/workspaces/t_ecc1d5ee")
+# Repo-local imports only - no workspace paths in public repo (OPSEC)
+sys.path.insert(0, "tests")
 from tool_fixtures import (
     TOOL_SCHEMAS, validate_tool_call, invoke_fixture,
     get_fixture_weather, add, lookup_record, ToolFixtureHarness, MULTITURN_PROMPT
