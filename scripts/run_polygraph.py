@@ -28,8 +28,24 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, Optional
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from enum import Enum
 import subprocess
 import time
+
+# Stage 6: Import Hermes profile isolation context
+try:
+    from polygraph_app.hermes import ProfileIsolationContext, isolate_test_profile
+except ImportError:
+    # Fallback if hermes module not yet available
+    ProfileIsolationContext = None
+    isolate_test_profile = None
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -80,7 +96,9 @@ except ImportError:
             tools = {}
             report = ReportConfig()
             paths = {}
-        
+            model_default = "qwen3.5:9b"
+            model_base_url = "http://localhost:11434/v1"
+            
         return PolygraphConfigDegraded()
 
 
@@ -547,6 +565,10 @@ class PolygraphReport:
     completed_at: str = ""
     overall_grade: str = "PENDING"
     total_duration_seconds: float = 0.0
+    
+    # Stage 6 fields for Hermes isolated test profile mode
+    hermes_mode: bool = False
+    profile_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -914,7 +936,7 @@ def score_response(test_id: str, response_tuple) -> tuple[float, str]:
 class ModelClient:
     """Generic HTTP client for OpenAI-compatible chat endpoints."""
 
-    def __init__(self, base_url: str, model: str, api_key: str, provider: str = "ollama",
+    def __init__(self, base_url: str | None, model: str, api_key: str, provider: str = "ollama",
                  request_timeout: float = 300.0):
         """Initialize the client.
 
@@ -922,9 +944,15 @@ class ModelClient:
         - No POLYGRAPH_* identity env overrides (spec mandates no such checks)
         - Identity comes from config.yaml, not environment variables
         
+        Stage 6: Accept None base_url for Hermes isolated test profile mode
+          - Use model_base_url or empty string when base_url is None
+        
         F7: request_timeout parameter for configurable timeout (default 300s local-model value)
         """
-        self.base_url = normalize_base_url(base_url)
+        # P2 FIX: Handle None base_url for Hermes isolation
+        effective_base_url = normalize_base_url(base_url) if base_url else ""
+        
+        self.base_url = effective_base_url
         self.model = model
         self.api_key = api_key  # P1: never fallback to OPENAI_API_KEY env var
         self.provider = provider
@@ -1388,25 +1416,60 @@ def _classify_http_error(status: int) -> str:
 
 
 class PolygraphRunner:
-    def __init__(self, client: ModelClient, severity: Severity, output_path: str | None = None, no_tools: bool = False, args: argparse.Namespace | None = None):
+    def __init__(self, client: ModelClient, severity: Severity, output_path: str | None = None, no_tools: bool = False, args: argparse.Namespace | None = None, 
+                 hermes_mode: bool = False, profile_ctx: Optional[ProfileIsolationContext] = None):
         self.client = client
         self.severity = severity
         self.output_path = output_path
         self.no_tools = no_tools
         self.args = args  # CLI args for streaming support (Stage 4)
+        self.hermes_mode = hermes_mode
+        self.profile_ctx = profile_ctx
+        
+        # Stage 6: Skip gateway/cron jobs in Hermes clone mode
+        if self.hermes_mode and self.profile_ctx and self.profile_ctx.bank_id:
+            self.skip_gateway = True
+            self.skip_cron_jobs = True
+        
         self.test_ids = SEVERITY_TESTS[severity]
-        self.report = PolygraphReport(
-            model=client.model,
-            provider=client.provider,
-            severity=severity.value,
-            test_ids=self.test_ids,
-            started_at=datetime.now().isoformat(timespec="seconds"),
-        )
+        
+        # Stage 6: Initialize report with Hermes mode info
+        if hermes_mode:
+            self.report = PolygraphReport(
+                model=client.model,
+                provider=client.provider,
+                severity=severity.value,
+                test_ids=self.test_ids,
+                started_at=datetime.now().isoformat(timespec="seconds"),
+                hermes_mode=hermes_mode,
+                profile_id=profile_ctx.profile_id if profile_ctx else None,
+            )
+        else:
+            self.report = PolygraphReport(
+                model=client.model,
+                provider=client.provider,
+                severity=severity.value,
+                test_ids=self.test_ids,
+                started_at=datetime.now().isoformat(timespec="seconds"),
+            )
 
     async def run(self) -> int:
-        """Execute all tests. Returns exit code (0=pass, 1=fail)."""
+        """Execute all tests. Returns exit code (0=pass, 1=fail).
+
+        Stage 6: Handle Hermes mode vs raw endpoint mode separately in output
+          - When hermes_mode=True: profile_ctx is active, use isolated session dirs
+          - Report both modes' results independently
+        """
         print(f"[polygraph] Running {self.severity.value} battery against "
               f"{self.client.provider}/{self.client.model}")
+        
+        # Stage 6: Hermes mode tracking
+        if self.hermes_mode and self.profile_ctx:
+            print(f"[hermes] Using isolated test profile: {self.profile_ctx.clone_id}")
+            print(f"[hermes] Bank ID: {self.profile_ctx.bank_id}")
+            print(f"[hermes] Workdir: {self.profile_ctx.workdir}")
+            print(f"[hermes] Fixtures dir: {self.profile_ctx.fixtures_dir}")
+        
         print(f"[polygraph] Tests to run: {len(self.test_ids)}")
 
         total_start = time.monotonic()
@@ -1593,7 +1656,12 @@ class PolygraphRunner:
 
 
 def _serialize_report(report: PolygraphReport) -> dict:
-    """Convert report to a JSON-safe dictionary."""
+    """Convert report to a JSON-safe dictionary.
+
+    Stage 6: Add Hermes mode info to manifest for verification
+      - hermes_mode field indicates isolated test profile is active
+      - profile_id tracks which clone was used
+    """
     return {
         "model": report.model,
         "provider": report.provider,
@@ -1604,6 +1672,9 @@ def _serialize_report(report: PolygraphReport) -> dict:
         "total_duration_seconds": report.total_duration_seconds,
         "test_ids_run": report.test_ids,
         "results": [asdict(r) for r in report.results],
+        # Stage 6: Hermes mode tracking (exclude .env contents from manifest redaction)
+        "hermes_mode": getattr(report, 'hermes_mode', False),
+        "profile_id": getattr(report, 'profile_id', None),
     }
 
 
@@ -1659,13 +1730,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--prompts", type=str, default=None,
         help="Comma-separated prompt templates to mix with suite prompts",
     )
+    parser.add_argument(
+        "--hermes", action="store_true",
+        dest="hermes_mode",
+        help="Enable Hermes end-to-end mode with isolated test profiles (Stage 6)",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
-
+        
         # P1 v1.2 conformance: resolve model config and generate manifest for reproducibility
         try:
             manifest = _resolve_model_config_and_plugins()
@@ -1681,23 +1757,61 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[polygraph] {e}", file=sys.stderr)
             return 1
         
+        # P2 FIX: Extract model_default and base_url from config for Hermes isolation
+        try:
+            cfg = load_config(path=None) if args.hermes_mode else None
+            model_default = getattr(cfg, 'model_default', "qwen3.5:9b") if cfg else "qwen3.5:9b"
+            model_base_url = getattr(cfg, 'model_base_url', base_url) if cfg and hasattr(cfg, 'model_base_url') else base_url
+        except (ImportError, AttributeError):
+            # Config load failed - use defaults
+            model_default = "qwen3.5:9b"
+            model_base_url = base_url
+        
         # F7: CLI --timeout overrides config value if provided
         effective_timeout = args.timeout if args.timeout is not None else request_timeout
 
-        client = ModelClient(
-            base_url=base_url,
-            model=model_default,
-            api_key=api_key,
-            provider=api_mode or "ollama",
-            request_timeout=effective_timeout,
-        )
-
+        # Hermes mode handling - clone source profile and set up isolation
+        if args.hermes_mode:
+            from polygraph_app.hermes import isolate_test_profile, ProfileIsolationContext
+            try:
+                # Clone source profile and create isolated test context
+                profile_ctx = isolate_test_profile(
+                    source_profile=model_base_url.split("/")[-1] if model_base_url else "bubo",
+                    workdir="/home/stefan/.hermes/kanban/workspaces/t_4d20f82e",
+                )
+            except Exception as e:
+                print(f"[polygraph] Profile isolation failed: {e}", file=sys.stderr)
+                return 1
+            
+            client = ModelClient(
+                base_url=profile_ctx.isolated_base_url,
+                model=model_default,
+                api_key=api_key,
+                provider=api_mode or "ollama",
+                request_timeout=effective_timeout,
+            )
+            
+            # Use isolated workdir for Hermes mode
+            if profile_ctx.workdir:
+                os.environ["HERMES_HOME"] = profile_ctx.workdir
+        
+        else:
+            client = ModelClient(
+                base_url=base_url,
+                model=model_default,
+                api_key=api_key,
+                provider=api_mode or "ollama",
+                request_timeout=effective_timeout,
+            )
+        
         runner = PolygraphRunner(
             client=client,
             severity=Severity(args.severity),
             output_path=args.output,
             no_tools=args.no_tools,
             args=args,  # Forward parsed args for streaming support
+            hermes_mode=args.hermes_mode,  # Pass Hermes mode flag
+            profile_ctx=profile_ctx if args.hermes_mode else None,  # Pass isolation context
         )
 
         # Override test selection for manual test ID list
