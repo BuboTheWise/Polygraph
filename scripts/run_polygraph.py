@@ -13,11 +13,18 @@ Usage:
     python3 scripts/run_polygraph.py [OPTIONS]
 
 Exit codes:
-    0  — All tests passed (overall grade: PASS)
-    1  — One or more tests failed (overall grade: FAIL)
-    2  — Usage / configuration error
-    3  — Runtime exception during execution
+    0  - All tests passed (overall grade: PASS)
+    1  - One or more tests failed (overall grade: FAIL)
+    2  - Usage / configuration error
+    3  - Runtime exception during execution
 """
+
+# Bootstrap import path for polygraph_app package (ensures import works from any CWD)
+import sys
+from pathlib import Path
+repo_root = Path(__file__).resolve().parent.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 
 import argparse
 import asyncio
