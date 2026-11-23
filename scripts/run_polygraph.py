@@ -2212,8 +2212,19 @@ def main(argv: list[str] | None = None) -> int:
             level_metrics = asyncio.get_event_loop().run_until_complete(run_concurrent())
             
             if level_metrics:
-                # Collect and report per-level statistics
+                # ==================================================================
+                # Correctness gates validation (Polygraph #5b)
+                # Apply hard fails, statistical gates, and mark INVALID when needed
+                # ==================================================================
+                
+                # Import gates module for correctness validation
+                from polygraph_app.gates import apply_hard_fails, generate_gate_report
+                
+                # Apply hard fails to each level's samples
+                print(f"\n[concurrency] Applying correctness gates...")
+                
                 for m in level_metrics:
+                    # Collect and report per-level statistics
                     print(f"\n=== Level {m.level} Metrics ===")
                     print(f"  Samples: {m.n}")
                         
@@ -2245,6 +2256,25 @@ def main(argv: list[str] | None = None) -> int:
                         
                     throughput = m.compute_throughput(wall_clock)
                     print(f"  Throughput: {throughput:.1f} tokens/sec")
+                    
+                    # Apply hard fail checks (after printing metrics but before INVALID mark)
+                    samples_valid, hard_fail_reasons = apply_hard_fails(m.samples, m.level)
+                    if not samples_valid and hard_fail_reasons:
+                        for reason in hard_fail_reasons:
+                            print(f"  [GATE] HARD FAIL: {reason}")
+                        # After hard fail, mark as INVALID - continue printing stats but note invalid status
+                    
+                    # Check insufficient samples condition
+                    ttft_invalid = ttft_n < 20
+                    e2e_invalid = e2e_n < 20
+                    
+                    if ttft_invalid or e2e_invalid:
+                        print(f"  [GATE] Insufficient samples for p95 metrics (TTFT: {ttft_n}, E2E: {e2e_n})")
+                    
+                    # Level status: INVALID if any gate failed (hard fail OR insufficient samples)
+                    level_invalid = not samples_valid or ttft_invalid or e2e_invalid
+                    if level_invalid:
+                        print(f"  [INVALID] Gates failed at level {m.level}")
 
         else:  # Sequential mode (concurrency_level == 1 or not set)
             # Ensure asyncio is explicitly imported for sequential execution
