@@ -86,7 +86,7 @@ def isolate_test_profile(
     Returns:
         ProfileIsolationContext with isolated profile setup
     """
-    hermes_home = os.environ.get("HERMES_HOME") or "/home/stefan/.hermes"
+    hermes_home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     profiles_dir = Path(hermes_home) / "profiles" / source_profile
     
     # Ensure workdir exists for clone

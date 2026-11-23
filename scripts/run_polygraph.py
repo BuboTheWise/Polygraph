@@ -1784,7 +1784,7 @@ def main(argv: list[str] | None = None) -> int:
                 # Clone source profile and create isolated test context
                 profile_ctx = isolate_test_profile(
                     source_profile=model_base_url.split("/")[-1] if model_base_url else "bubo",
-                    workdir="/home/stefan/.hermes/kanban/workspaces/t_4d20f82e",
+                    workdir=os.environ.get("HERMES_WORKDIR", os.path.expanduser("~/.hermes/kanban/workspaces")),
                 )
             except Exception as e:
                 print(f"[polygraph] Profile isolation failed: {e}", file=sys.stderr)

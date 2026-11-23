@@ -10,8 +10,9 @@ from typing import Any, AsyncGenerator, Tuple
 from dataclasses import dataclass
 
 # Use absolute imports from project root
+import os
 import sys
-sys.path.insert(0, "/home/stefan/Projects/Polygraph")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import our module directly
 from polygraph_app.streaming import (

@@ -85,7 +85,7 @@ def get_system_time() -> dict:
 
 def list_directory(path: str) -> dict:
     """List a directory (safe sandboxed paths only)."""
-    safe_paths = ["/tmp", "/home/stefan", "/etc"]
+    safe_paths = ["/tmp", os.path.expanduser("~"), "/etc"]
     if not path.startswith(tuple(safe_paths + [""])):
         return {"error": "path not in allowed list"}
     try:

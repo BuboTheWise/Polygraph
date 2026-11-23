@@ -2,8 +2,9 @@
 """Run Stage 4 streaming mock-server tests."""
 
 import asyncio
+import os
 import sys
-sys.path.insert(0, "/home/stefan/Projects/Polygraph")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from polygraph_app.streaming import (
     StreamMetrics,
