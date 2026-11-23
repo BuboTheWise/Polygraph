@@ -153,8 +153,10 @@ def _resolve_model_config_and_plugins():
     api_mode = "ollama"
     
     # Build effective_config with minimal fields (secrets already redacted by load_config)
+    import datetime
+    now = datetime.datetime.now().isoformat()
     effective_config = {
-        "spec": {"version": model_alias},
+        "spec": {"version": model_alias, "created": now},
         "profiles": {},
         "provider_chain": [{"kind": api_mode, "base_url": base_url}],
         "tools": {},
