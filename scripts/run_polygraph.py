@@ -1659,7 +1659,7 @@ def compute_overall_grade(results: list, max_error_rate: float | None = None) ->
     elif total_scored > 0 and (passed / total_scored) >= 0.7:
         overall_grade = "PASS"
         gate_reason = None
-    elif total_scored == 0 and skipped == len(results):
+    elif total_scored == 0 and len(results) > 0 and skipped == len(results):
         overall_grade = "SKIP_ALL"
         gate_reason = None
     else:
@@ -1951,6 +1951,10 @@ def _serialize_report(report: PolygraphReport) -> dict:
         # Stage 6: Hermes mode tracking (exclude .env contents from manifest redaction)
         "hermes_mode": getattr(report, 'hermes_mode', False),
         "profile_id": getattr(report, 'profile_id', None),
+        # Polygraph #1 Stage 1: grading integrity gate info
+        "error_rate": getattr(report, 'error_rate', None),
+        "max_error_rate": getattr(report, 'max_error_rate', None),
+        "gate_reason": getattr(report, 'gate_reason', None),
     }
 
 
@@ -2059,6 +2063,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--hermes", action="store_true",
         dest="hermes_mode",
         help="Enable Hermes end-to-end mode with isolated test profiles (Stage 6)",
+    )
+    # Polygraph #1 Stage 1 (grading integrity): opt-in error-rate gate
+    parser.add_argument(
+        "--max-error-rate", type=float, default=None, dest="max_error_rate",
+        help="Fail the run if (ERROR + NOT_SCORED) / total_scored exceeds this fraction "
+             "(0.0-1.0). Off by default — the gate is only active when explicitly set.",
     )
     return parser.parse_args(argv)
 
