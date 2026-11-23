@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 run_polygraph.py — Headless runner for the Polygraph verification battery.
+import yaml  # For reading profile YAML configs (issue #11 fix)
 
 Loads test definitions, executes them against a target model via generic
 OpenAI-compatible API interface, and produces structured JSON output suitable
@@ -75,38 +76,15 @@ except ImportError:
     sys.exit(2)
 
 try:
-    from scripts.polygraph_config import load_config, PolygraphConfig
+    from scripts.polygraph_config import load_config, PolygraphConfig, ConfigError
 except ImportError:
-    # polygraph_config not available - degraded mode with default config
-    def load_config(path=None):
-        from dataclasses import field
-        
-        class SpecMetadata:
-            version = "0.1.0"
-        
-        class ReportConfig:
-            include_spec_version = True
-            include_raw_responses = False
-            response_preview_chars = 80
-            
-        class ProviderEntry:
-            kind = "ollama"
-            model = "qwen3.5:9b"
-            base_url = "http://localhost:11434/v1"
-            timeout = 300
-        
-        class PolygraphConfigDegraded:
-            spec = SpecMetadata()
-            profiles = {}
-            provider_chain = [ProviderEntry()]
-            categories = {}
-            tools = {}
-            report = ReportConfig()
-            paths = {}
-            model_default = "qwen3.5:9b"
-            model_base_url = "http://localhost:11434/v1"
-            
-        return PolygraphConfigDegraded()
+    # polygraph_config not available - fail loudly instead of degraded mode with hardcoded defaults
+    # GH-12 added sys.path bootstrap; if this still fails, environment is misconfigured
+    raise RuntimeError(
+        "Failed to import polygraph_config. This indicates a broken environment or missing installation. "
+        "Expected polygraph_config at scripts/polygraph_config.py to be importable. "
+        "Run 'hermes install polygraph' or ensure venv is properly set up and installed."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -145,16 +123,57 @@ def _resolve_model_config_and_plugins():
     hermes_home = os.environ.get("HERMES_HOME") or "."
     config_path = os.path.join(hermes_home, "config.yaml") if hermes_home else None
     
-    cfg = load_config(path=config_path)
-    
+    try:
+        cfg = load_config(path=config_path)
+    except (FileNotFoundError, ConfigError, RuntimeError) as e:
+        # Profile config not found - attempt to read from HERMES_HOME/config.yaml directly
+        now = datetime.now().isoformat()  # Compute timestamp once for this exception path
+        import yaml
+        hermes_home = os.environ.get("HERMES_HOME") or "."
+        config_path = os.path.join(hermes_home, "config.yaml") if hermes_home else None
+        
+        if config_path and os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    cfg_dict = yaml.safe_load(f) or {}
+                profile_model = cfg_dict.get("model", {})
+                model_alias = profile_model.get("alias") if isinstance(profile_model, dict) else None
+                
+                # GH-11: Support both 'alias' and 'default' fields in profile config
+                # Fallback defaults if model config is missing or incomplete  
+                if not model_alias:
+                    model_alias = profile_model.get("default", None) if isinstance(profile_model, dict) else None
+
+                # Fail loudly when no active model resolvable from profile config
+                if not model_alias:
+                    raise RuntimeError(
+                        f"No active model resolvable in profile config at {config_path}. "
+                        "Expected 'model' section with non-empty 'alias' or 'default_model' field. "
+                        f"Current config has keys: {list(profile_model.keys()) if isinstance(profile_model, dict) else 'not a dict'}"
+                    )
+                base_url = profile_model.get("base_url") or "http://localhost:11434/v1"
+                api_mode = profile_model.get("api_mode") or "ollama"
+                
+                # Build a minimal config object that matches load_config's signature
+                cfg = type('PolygraphConfig', (), {
+                    'spec': type('Spec', (), {'version': model_alias, 'created': now})(),
+                    'model_base_url': base_url,
+                    'spec_version': model_alias,
+                    'paths': {}
+                })()
+            except Exception as e2:
+                raise RuntimeError(f"Failed to read model config from {config_path}: {e2}")
+        else:
+            # No profile config found - fail loudly
+            raise RuntimeError("No active model available: HERMES_HOME/config.yaml not found or missing 'model' section")
+
     # Use spec.version as model_alias (conformance to P1 v1.2)
-    model_alias = str(cfg.spec.version) if hasattr(cfg.spec, 'version') else "qwen3.5:9b"
-    base_url = ""
-    api_mode = "ollama"
-    
+    model_alias = str(cfg.spec.version) if hasattr(cfg.spec, 'version') else model_alias
+    base_url = cfg.model_base_url if hasattr(cfg, 'model_base_url') else base_url
+    api_mode = cfg.spec_version if hasattr(cfg, 'spec_version') and cfg.spec_version != "ollama" else api_mode
+
     # Build effective_config with minimal fields (secrets already redacted by load_config)
-    import datetime
-    now = datetime.datetime.now().isoformat()
+    now = datetime.now().isoformat()  # Compute timestamp after all config resolution
     effective_config = {
         "spec": {"version": model_alias, "created": now},
         "profiles": {},
@@ -629,7 +648,13 @@ def score_response(test_id: str, response_tuple) -> tuple[float, str]:
     executed_tools = None
     
     if not isinstance(response_tuple, str):
-        response_type, data, executed_tools = response_tuple
+        # Handle both 2-element and 3-element tuples (some model responses are just text without tools)
+        try:
+            response_type, data, executed_tools = response_tuple
+        except ValueError:
+            # If we only have 2 values, assume no tools were executed
+            response_type, data = response_tuple
+            executed_tools = []
         tool_response_str = f"{response_type}: {data}" if data else f"{response_type}:"
     
     # Extract the string content for scoring
@@ -1549,7 +1574,9 @@ class PolygraphRunner:
                     if isinstance(response, tuple):
                         response_type = response[2] if len(response) > 2 else None
                         response_data = {"merged": merged_response, "raw_chunks": chunks_consumed}
-                        response = (response_type, response_data, response[3] if len(response) > 3 else [])
+                        # Create a proper 3-tuple for scoring (type, data, tools)
+                        original_length = len(response) if isinstance(response, tuple) else 0
+                        response = (response_type, response_data, [])
                     score, rationale = score_response(test_id, response)
                 else:
                     # No chunks - something went wrong
@@ -1756,7 +1783,12 @@ def main(argv: list[str] | None = None) -> int:
             manifest = _resolve_model_config_and_plugins()
             
             # Extract values from manifest (manifest contains all required fields)
-            model_alias = manifest.get("spec_version", "qwen3.5:9b")
+            model_alias = manifest.get("spec_version")
+            if not model_alias:
+                raise RuntimeError(
+                    f"Herme mode requires 'spec_version' in manifest. "
+                    f"Manifest keys: {list(manifest.keys()) if isinstance(manifest, dict) else type(manifest).__name__}"
+                )
             base_url = manifest.get("endpoint", "")
             api_mode = manifest.get("engine_version", "ollama")
             api_key = os.environ.get("POLYGRAPH_API_KEY", "ollama")  # ollama doesn't use API keys by default
@@ -1767,19 +1799,43 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         
         # P2 FIX: Extract model_default and base_url from config for Hermes isolation
-        try:
-            cfg = load_config(path=None) if args.hermes_mode else None
-            model_default = getattr(cfg, 'model_default', "qwen3.5:9b") if cfg else "qwen3.5:9b"
-            model_base_url = getattr(cfg, 'model_base_url', base_url) if cfg and hasattr(cfg, 'model_base_url') else base_url
-        except (ImportError, AttributeError):
-            # Config load failed - use defaults
-            model_default = "qwen3.5:9b"
-            model_base_url = base_url
-        
+        if not args.hermes_mode:
+            # Non-Hermes mode - extract model from existing config (existing polygraph_config handles this)
+            try:
+                cfg = load_config(path=None)
+                model_default = str(cfg.spec.version) if hasattr(cfg.spec, 'version') else None
+                model_base_url = getattr(cfg, 'model_base_url', base_url) if hasattr(cfg, 'model_base_url') else base_url
+            except (ImportError, AttributeError, RuntimeError) as e:
+                raise RuntimeError(f"Failed to load polygraph config for non-Hermes mode: {e}") from e
+        else:
+            try:
+                cfg = load_config(path=None)
+                if not cfg:
+                    raise RuntimeError("Herme mode requires a loaded polygraph config. "
+                                       "Set HERMES_HOME environment variable or pass --config path.")
+                model_default = getattr(cfg, 'model_default', None)
+                model_base_url = getattr(cfg, 'model_base_url', base_url) if hasattr(cfg, 'model_base_url') else base_url
+            except (ImportError, AttributeError, RuntimeError) as e:
+                raise RuntimeError(f"Failed to load polygraph config for Hermes isolation: {e}") from e
+
         # F7: CLI --timeout overrides config value if provided
         effective_timeout = args.timeout if args.timeout is not None else request_timeout
+        
+        # Ensure model_default is a valid string - use cfg.model.default fallback if needed
+        model_value = model_default
+        if model_value is None:
+            # Try to get from cfg.model.default as fallback
+            try:
+                cfg_model_default = getattr(getattr(cfg, 'model', {}), 'default', None)
+                if cfg_model_default:
+                    model_value = str(cfg_model_default)
+            except (AttributeError, TypeError):
+                pass
+        
+        # If still no valid model, fail loudly
+        if not model_value or model_value.strip() == "":
+            raise RuntimeError("No active model available. Check profile config for 'model.default' setting.")
 
-        # Hermes mode handling - clone source profile and set up isolation
         if args.hermes_mode:
             from polygraph_app.hermes import isolate_test_profile, ProfileIsolationContext
             try:
@@ -1874,6 +1930,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
         else:  # Sequential mode (concurrency_level == 1 or not set)
+            # Ensure asyncio is explicitly imported for sequential execution
+            import asyncio
             exit_code = asyncio.run(runner.run())
             return exit_code
     
