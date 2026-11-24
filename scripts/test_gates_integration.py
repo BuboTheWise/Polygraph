@@ -9,8 +9,8 @@ This script simulates a concurrency run where:
 Expected output shows the difference between valid and invalid levels.
 """
 
-import sys
-sys.path.insert(0, '/home/stefan/Projects/Polygraph')
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from polygraph_app.concurrency import RequestMetrics, LevelMetrics
 

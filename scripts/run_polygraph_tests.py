@@ -3,11 +3,12 @@
 
 import json
 import sys
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
-sys.path.insert(0, "/home/stefan/Projects/Polygraph")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from polygraph_app.mock_server import MockServer
 

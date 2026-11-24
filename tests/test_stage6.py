@@ -13,7 +13,7 @@ This script verifies:
 
 import sys
 import os
-sys.path.insert(0, "/home/stefan/Projects/Polygraph")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from polygraph_app.hermes_integration import (
     ProfileIsolationContext,

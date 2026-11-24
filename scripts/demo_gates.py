@@ -8,8 +8,8 @@ This simulates a production concurrency run where:
 - Shows statistical gate comparison against baseline
 """
 
-import sys
-sys.path.insert(0, '/home/stefan/Projects/Polygraph')
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from polygraph_app.concurrency import RequestMetrics
 
