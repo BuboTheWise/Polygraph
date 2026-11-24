@@ -246,6 +246,10 @@ def _resolve_model_config_and_plugins():
     """Resolve model configuration and wire plugins (Stage 3)."""
     hermes_home = os.environ.get("HERMES_HOME") or "."
     config_path = os.path.join(hermes_home, "config.yaml") if hermes_home else None
+    provider_name = "unknown"
+    model_alias = None
+    base_url = None
+    api_mode = None
     
     try:
         cfg = load_config(path=config_path)
@@ -289,12 +293,17 @@ def _resolve_model_config_and_plugins():
                     base_url = base_url_from_config
 
                 api_mode = profile_model.get("api_mode") or "ollama"
-                
-                # Build a minimal config object that matches load_config's signature
+                provider_name = profile_model.get("provider") or "unknown"
+
+                # Build a minimal config object that matches load_config's signature.
+                # GH-11: spec_version carries the API engine, NOT the model alias —
+                # storing the model alias here clobbers api_mode downstream and
+                # lands in the report's 'provider' field.
                 cfg = type('PolygraphConfig', (), {
                     'spec': type('Spec', (), {'version': model_alias, 'created': now})(),
                     'model_base_url': base_url,
-                    'spec_version': model_alias,
+                    'spec_version': api_mode,
+                    'provider_name': provider_name,
                     'paths': {}
                 })()
             except Exception as e2:
@@ -303,9 +312,26 @@ def _resolve_model_config_and_plugins():
             # No profile config found - fail loudly
             raise RuntimeError("No active model available: HERMES_HOME/config.yaml not found or missing 'model' section")
 
-    # Use spec.version as model_alias (conformance to P1 v1.2)
-    model_alias = str(cfg.spec.version) if hasattr(cfg.spec, 'version') else model_alias
+    # GH-11: the model to request is the profile-resolved active model.
+    #  - Exception path (profile config): model_alias is already the profile's
+    #    active model — keep it (do NOT let spec.version clobber it).
+    #  - Success path (valid polygraph.yaml): model_alias is not set yet; derive
+    #    it from the provider chain's model, NOT spec.version (which is the
+    #    battery spec revision, e.g. "1.0", not a model name).
+    if model_alias is None:
+        _chain = getattr(cfg, "provider_chain", None)
+        if _chain:
+            model_alias = str(_chain[0].model)
+        else:
+            model_alias = str(cfg.spec.version) if hasattr(cfg.spec, "version") else None
+    if not model_alias:
+        raise RuntimeError(
+            "No active model resolvable from polygraph config. "
+            "Set provider_chain[0].model in polygraph.yaml or run under HERMES_HOME "
+            "with a profile config.yaml (model.default)."
+        )
     base_url = cfg.model_base_url if hasattr(cfg, 'model_base_url') else base_url
+    # On the loaded cfg, spec_version carries the API engine, so this preserves it.
     api_mode = cfg.spec_version if hasattr(cfg, 'spec_version') and cfg.spec_version != "ollama" else api_mode
 
     # Build effective_config with minimal fields (secrets already redacted by load_config)
@@ -326,6 +352,7 @@ def _resolve_model_config_and_plugins():
         "base_url": base_url,
         "server_version": get_model_server_version(model_alias),
         "host_notes": os.environ.get("POLYGRAPH_HOST_NOTES", ""),
+        "provider_name": provider_name,
         "chat_template_key": f"chat_template_{model_alias}",
     }
     
@@ -377,11 +404,13 @@ def generate_manifest(
         "git_dirty": git_dirty,
         "prompts_sha256": {},  # Populated during actual test execution
         "fixtures_sha256": "",
-        "endpoint": model_info.get("base_url", ""),
-        "model_alias": model_info.get("alias", ""),
+        "endpoint": model_info["base_url"],
+        "model_alias": model_info["alias"],
+        "provider": model_info.get("provider") or model_info.get("provider_name") or "unknown",
         "server_version": model_info.get("server_version", "unknown"),
         "engine_version": model_info.get("engine", "ollama"),
         "user_host_notes": model_info.get("host_notes", ""),
+        "provider_name": model_info.get("provider_name", "unknown"),
         "chat_template_key": model_info.get("chat_template_key", ""),
     }
     
@@ -2082,14 +2111,16 @@ def main(argv: list[str] | None = None) -> int:
             manifest = _resolve_model_config_and_plugins()
             
             # Extract values from manifest (manifest contains all required fields)
-            model_alias = manifest.get("spec_version")
+            model_alias = manifest.get("model_alias") or manifest.get("spec_version")
+            provider_name = manifest.get("provider_name") or ""
             if not model_alias:
                 raise RuntimeError(
-                    f"Herme mode requires 'spec_version' in manifest. "
+                    f"Hermes mode requires 'spec_version' in manifest. "
                     f"Manifest keys: {list(manifest.keys()) if isinstance(manifest, dict) else type(manifest).__name__}"
                 )
             base_url = manifest.get("endpoint", "")
             api_mode = manifest.get("engine_version", "ollama")
+            provider_name = manifest.get("provider") or "ollama"
             api_key = os.environ.get("POLYGRAPH_API_KEY", "ollama")  # ollama doesn't use API keys by default
             request_timeout = 300
             
@@ -2102,7 +2133,7 @@ def main(argv: list[str] | None = None) -> int:
             # Non-Hermes mode - extract model from existing config (existing polygraph_config handles this)
             try:
                 cfg = load_config(path=None)
-                model_default = str(cfg.spec.version) if hasattr(cfg.spec, 'version') else None
+                model_default = model_alias  # profile's active model (resolved from HERMES_HOME), not the spec version
                 model_base_url = getattr(cfg, 'model_base_url', base_url) if hasattr(cfg, 'model_base_url') else base_url
             except (ImportError, AttributeError, RuntimeError) as e:
                 raise RuntimeError(f"Failed to load polygraph config for non-Hermes mode: {e}") from e
@@ -2110,7 +2141,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 cfg = load_config(path=None)
                 if not cfg:
-                    raise RuntimeError("Herme mode requires a loaded polygraph config. "
+                    raise RuntimeError("Hermes mode requires a loaded polygraph config. "
                                        "Set HERMES_HOME environment variable or pass --config path.")
                 model_default = getattr(cfg, 'model_default', None)
                 model_base_url = getattr(cfg, 'model_base_url', base_url) if hasattr(cfg, 'model_base_url') else base_url
@@ -2151,7 +2182,7 @@ def main(argv: list[str] | None = None) -> int:
                 base_url=profile_ctx.isolated_base_url,
                 model=model_default,
                 api_key=api_key,
-                provider=api_mode or "ollama",
+                provider=provider_name,
                 request_timeout=effective_timeout,
             )
             
@@ -2164,7 +2195,7 @@ def main(argv: list[str] | None = None) -> int:
                 base_url=base_url,
                 model=model_default,
                 api_key=api_key,
-                provider=api_mode or "ollama",
+                provider=provider_name,
                 request_timeout=effective_timeout,
             )
         
