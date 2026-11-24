@@ -19,6 +19,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -472,8 +473,9 @@ def run_stability_test() -> TestResult:
     )
 
 
-async def main():
+async def main(artifact_dir: Optional[str] = None):
     """Run the full CI behavioral test suite."""
+    artifact_dir = Path(artifact_dir) if artifact_dir else None  # convert str to Path
     print("="*80)
     print("CI BEHAVIORAL TEST MATRIX FOR POLYGRAPH #7B")
     print("="*80)
@@ -632,7 +634,10 @@ async def main():
     print("="*80)
     
     # Export results to JSONL
-    output_path = "/home/stefan/.hermes/kanban/workspaces/t_aed8d43d/results.jsonl"
+    if artifact_dir:
+        output_path = Path(artifact_dir) / "results.jsonl"
+    else:
+        output_path = Path(__file__).parent.parent / "artifacts" / "results.jsonl"
     with open(output_path, "w", encoding="utf-8") as f:
         for result in results:
             f.write(json.dumps(result.to_dict()) + "\n")
@@ -649,7 +654,11 @@ async def main():
         "results": [r.to_dict() for r in results],
     }
     
-    summary_path = "/home/stefan/.hermes/kanban/workspaces/t_aed8d43d/test_summary.json"
+    # Export summary JSON
+    if artifact_dir:
+        summary_path = Path(artifact_dir) / "test_summary.json"
+    else:
+        summary_path = Path(__file__).parent.parent / "artifacts" / "test_summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(f"Summary written to: {summary_path}")

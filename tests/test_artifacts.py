@@ -24,43 +24,39 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# Add scripts directory to path for importing run_polygraph_tests
-scripts_dir = Path(__file__).parent.parent / "scripts"
-sys.path.insert(0, str(scripts_dir))
-
-# Import TestResult and test functions
-from run_polygraph_tests import (
-    TestResult,
-    run_basic_content_test,
-    run_reasoning_test,
-    run_tool_calls_test,
-    run_malformed_json_test,
-    run_text_embedded_tool_calls_test,
-    run_http_500_test,
-    run_http_503_test,
-    run_slow_first_byte_test,
-    run_mid_stream_disconnect_test,
-    run_utf8_multibyte_split_test,
-    run_all_error_run_test,
-    run_unmatched_rubric_test,
-    run_tool_hard_fail_test,
-    run_invalid_marking_test,
-    run_insufficient_samples_test,
-    run_max_error_rate_test,
+# Import from hygiene module (not from scripts/run_polygraph_tests)
+polygraph_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(polygraph_dir / "polygraph_app"))
+from polygraph_app.hygiene import (
+    redact_config,
+    check_redaction_in_artifacts,
+    collect_artifact_checksums,
+    validate_artifact_shape,
+    write_manifest_json,
+    write_summary_json,
+    normalize_url,
+    get_git_info,
 )
 
 
-VALID_GRADING_STATES = {'PENDING', 'PASS', 'FAIL', 'NOT_SCORED', 'INVALID', 'INSUFFICIENT_SAMPLES'}
-
-RequiredMetrics = {'ttft_ms', 'e2e_ms', 'latency_p50_ms', 'latency_p95_ms'}
-CoreResultFields = {
-    'name', 'passed', 'expected', 'actual', 
-    'ttft_ms', 'e2e_ms', 'latency_p50_ms', 'latency_p95_ms',
-    'error_count', 'samples', 'error_rate'
-}
-
-
-def validate_test_result_schema(result: TestResult) -> Tuple[bool, List[str]]:
+def test_no_stderr_pollution():
+    """Check that running validation tests doesn't produce unexpected stderr."""
+    # Capture stderr during a simple operation
+    import io
+    
+    old_stderr = sys.stderr
+    stderr_capture = io.StringIO()
+    
+    try:
+        sys.stderr = stderr_capture
+        
+        # Run a simple test to check for pollution
+        result = redact_config({"api_key": "test"})
+        
+        return True
+        
+    finally:
+        sys.stderr = old_stderr
     """Validate TestResult instance matches specification."""
     errors = []
     

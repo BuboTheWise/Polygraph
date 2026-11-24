@@ -1,0 +1,15 @@
+{
+  "spec_version": "1.0.0",
+  "polygraph_run_id": "20261124T015752",
+  "commit": "e652746",
+  "dirty": true,
+  "branch": "main",
+  "artifacts": {},
+  "config_summary": {
+    "model": "llama3.2",
+    "provider": "ollama",
+    "endpoint": "/v1"
+  },
+  "server_version": "unknown",
+  "engine_version": "ollama"
+}
