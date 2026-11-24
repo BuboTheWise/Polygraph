@@ -59,10 +59,6 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Literal
 
-# F10: Import URL normalizer module (package-relative: works when imported as
-# `scripts.run_polygraph` (tests, plugins) as well as when run as a script)
-from scripts.normalize_url import normalize_base_url as _canonicalize_base_url
-
 # Stage 4: Import streaming helpers (isolated module to avoid context issues)
 from polygraph_app.streaming import (
     StreamMetrics,
@@ -96,10 +92,11 @@ except ImportError:
 # double-slash / repeated-/v1 edge cases) and always returns a single normalized
 # path ending in /v1/chat/completions.
 #
-# NOTE: this is the *endpoint* normalizer (it returns the full endpoint). The
-# sibling import `_canonicalize_base_url` (from normalize_url) is a lower-level
-# *base* canonicalizer still used by ModelClient. They coexist; this one is the
-# Task-0 helper that the Polygraph #1 CLI integration (t_2776be27) wires in.
+# NOTE: this *is* the base/endpoint normalizer used by ModelClient — it returns
+# the full .../v1/chat/completions endpoint, so ModelClient strips the trailing
+# /chat/completions to recover the base. (The older scripts/normalize_url.py
+# base canonicalizer is still available to run_polygraph_clean.py but is no
+# longer imported here.)
 
 #: Fallback endpoint when the supplied base URL is empty/None (local Ollama).
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
@@ -1154,9 +1151,19 @@ class ModelClient:
         
         F7: request_timeout parameter for configurable timeout (default 300s local-model value)
         """
-        # P2 FIX: Handle None base_url for Hermes isolation
-        effective_base_url = _canonicalize_base_url(base_url) if base_url else ""
-        
+        # P1 Stage 1 (F10): normalize the base URL into a single canonical /v1 endpoint.
+        # Accepts bare host, trailing-slash, and /v1-suffixed bases (plus edge cases
+        # such as repeated /v1, mixed case, whitespace) and always yields exactly one
+        # .../v1/... endpoint — e.g. http://localhost, http://localhost/ and
+        # http://localhost/v1 all normalize to the same /v1 path. See normalize_base_url().
+        # Stage 6: an empty/None base_url (Hermes isolated profile) is left as "" so the
+        # isolation layer supplies the concrete endpoint.
+        if base_url:
+            full_endpoint = normalize_base_url(base_url)
+            effective_base_url = full_endpoint[: -len("/chat/completions")]
+        else:
+            effective_base_url = ""
+
         self.base_url = effective_base_url
         self.model = model
         self.api_key = api_key  # P1: never fallback to OPENAI_API_KEY env var

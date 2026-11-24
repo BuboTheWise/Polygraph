@@ -36,6 +36,10 @@ The `providers:` map and `provider_chain` in `config/polygraph.yaml` are **super
 
 `max_tokens` is a **per-response generation cap**, not the model's context window. It is a *named, documented run parameter* (default `4096`), tunable via the `--max-tokens` run flag — it is **not** an identity flag and must not be confused with the profile's `context_length` (e.g. `65536` on the Ollama profiles). Raising it is a deliberate spec/run decision, not a hidden constant, and it never selects a model.
 
+### Grading Gate (v1.2)
+
+`--max-error-rate` (0.0–1.0) is an **optional grading gate** that controls how much noise a run may carry. When set, the run **fails** if `(ERROR + NOT_SCORED) / total_scored` exceeds the threshold — so an all-error run cannot pass, and a run where most tests errored is flagged rather than silently scored on the few that ran. It is **off by default** (`None`): the gate only engages when you explicitly set it, so a bare run is unaffected. Like `--max-tokens`, it is a run parameter, not an identity flag.
+
 ### Workflow Rules (v1.2 — normative)
 
 Two rules codified from the 2026-11-15 incident (runner was modified instead of run-and-reported; a success was reported that the evidence did not cover):

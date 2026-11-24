@@ -32,7 +32,7 @@ python3 scripts/run_polygraph.py --severity critical
 python3 scripts/run_polygraph.py --tests 1A,3B,11D
 ```
 
-Flags: `--severity`, `--output` (JSON report path), `--no-tools` (skip tool-requiring tests), `--tests` (comma-separated test IDs), `--max-tokens` (per-response cap, default 4096 — a run parameter, **not** identity). Model/provider/endpoint are **not flags** — they come from the active profile's Hermes config (Operating Model, README).
+Flags: `--severity`, `--output` (JSON report path), `--no-tools` (skip tool-requiring tests), `--tests` (comma-separated test IDs), `--max-tokens` (per-response cap, default 4096 — a run parameter, **not** identity), `--max-error-rate` (0.0–1.0 — **grading gate**: fail the run if (ERROR + NOT_SCORED) / total_scored exceeds this; **off by default** — the gate only engages when you explicitly set it). Model/provider/endpoint are **not flags** — they come from the active profile's Hermes config (Operating Model, README).
 
 ## Exit codes
 
