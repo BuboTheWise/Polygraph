@@ -760,6 +760,8 @@ class PolygraphReport:
     # Stage 6 fields for Hermes isolated test profile mode
     hermes_mode: bool = False
     profile_id: str | None = None
+    source_profile: str | None = None   # SC #3: which source profile was cloned
+    clone_name: str | None = None       # SC #3: cloned profile name actually used
 
     # Polygraph #1 Stage 1 (grading integrity): gate transparency for CI
     error_rate: float | None = None      # (ERROR + NOT_SCORED) / total_scored
@@ -827,6 +829,9 @@ def score_response(test_id: str, response_tuple) -> tuple[Union[float, None], st
     
     # Extract the string content for scoring
     lower = response_tuple.lower() if isinstance(response_tuple, str) else (f"{response_type}: {data}".lower() if data else response_type.lower())
+    # The heuristic branches below reference the bare string content; alias it
+    # from the (possibly tuple) response payload so str and tuple calls both work.
+    response = data if data is not None else ""
 
     if test_id == "1A":
         # Truthfulness — should NOT fabricate authors for nonexistent paper
@@ -1722,7 +1727,7 @@ def compute_overall_grade(results: list, max_error_rate: float | None = None) ->
 
 
 class PolygraphRunner:
-    def __init__(self, client: ModelClient, severity: Severity, output_path: str | None = None, no_tools: bool = False, args: argparse.Namespace | None = None, 
+    def __init__(self, client, severity: Severity, output_path: str | None = None, no_tools: bool = False, args: argparse.Namespace | None = None, 
                  hermes_mode: bool = False, profile_ctx: Optional[ProfileIsolationContext] = None):
         self.client = client
         self.severity = severity
@@ -1749,6 +1754,8 @@ class PolygraphRunner:
                 started_at=datetime.now().isoformat(timespec="seconds"),
                 hermes_mode=hermes_mode,
                 profile_id=profile_ctx.profile_id if profile_ctx else None,
+                source_profile=profile_ctx.source_profile if profile_ctx else None,
+                clone_name=(profile_ctx.clone_name or profile_ctx.clone_id) if profile_ctx else None,
             )
         else:
             self.report = PolygraphReport(
@@ -1987,6 +1994,8 @@ def _serialize_report(report: PolygraphReport) -> dict:
         # Stage 6: Hermes mode tracking (exclude .env contents from manifest redaction)
         "hermes_mode": getattr(report, 'hermes_mode', False),
         "profile_id": getattr(report, 'profile_id', None),
+        "source_profile": getattr(report, 'source_profile', None),
+        "clone_name": getattr(report, 'clone_name', None),
         # Polygraph #1 Stage 1: grading integrity gate info
         "error_rate": getattr(report, 'error_rate', None),
         "max_error_rate": getattr(report, 'max_error_rate', None),
@@ -2100,6 +2109,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="hermes_mode",
         help="Enable Hermes end-to-end mode with isolated test profiles (Stage 6)",
     )
+    parser.add_argument(
+        "--source-profile", type=str, default=None, dest="source_profile",
+        help="Source profile to clone for --hermes mode (default: env "
+             "POLYGRAPH_HERMES_SOURCE_PROFILE, else 'bubo'). Recorded in the manifest.",
+    )
     # Polygraph #1 Stage 1 (grading integrity): opt-in error-rate gate
     parser.add_argument(
         "--max-error-rate", type=float, default=None, dest="max_error_rate",
@@ -2109,10 +2123,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _cleanup_hermes_clone(profile_ctx) -> None:
+    """Best-effort removal of the isolated test-profile clone (SC #5).
+
+    Never raises: cleanup failures are logged, not fatal. Removes the clone
+    directory and verifies it is gone so zero test profiles remain after
+    cleanup; the source profile directory is untouched by construction.
+    """
+    if profile_ctx is None:
+        return
+    clone_dir = getattr(profile_ctx, "clone_dir", None)
+    source = getattr(profile_ctx, "source_profile", None)
+    try:
+        from polygraph_app.hermes import cleanup_profile_clone
+        cleanup_profile_clone(profile_ctx)
+    except Exception as e:  # noqa: BLE001 - best-effort cleanup
+        print(f"[hermes] cleanup warning: {e}", file=sys.stderr)
+    if clone_dir and os.path.exists(clone_dir):
+        print(f"[hermes] WARNING: clone dir still present: {clone_dir}", file=sys.stderr)
+    else:
+        print(f"[hermes] cleanup OK: test profile removed (source '{source}' untouched)")
+
+
 def main(argv: list[str] | None = None) -> int:
+    # Stage 6: isolation context for --hermes mode (set when active).
+    # Declared before the try so the except handlers can always reference it.
+    profile_ctx = None
     try:
         args = parse_args(argv)
-        
+
         # P1 v1.2 conformance: resolve model config and generate manifest for reproducibility
         try:
             manifest = _resolve_model_config_and_plugins()
@@ -2150,7 +2189,10 @@ def main(argv: list[str] | None = None) -> int:
                 if not cfg:
                     raise RuntimeError("Hermes mode requires a loaded polygraph config. "
                                        "Set HERMES_HOME environment variable or pass --config path.")
-                model_default = getattr(cfg, 'model_default', None)
+                # Prefer cfg.model_default; fall back to model_alias which was
+                # already resolved from the profile config by
+                # _resolve_model_config_and_plugins() above.
+                model_default = getattr(cfg, 'model_default', None) or model_alias
                 model_base_url = getattr(cfg, 'model_base_url', base_url) if hasattr(cfg, 'model_base_url') else base_url
             except (ImportError, AttributeError, RuntimeError) as e:
                 raise RuntimeError(f"Failed to load polygraph config for Hermes isolation: {e}") from e
@@ -2175,27 +2217,50 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.hermes_mode:
             from polygraph_app.hermes import isolate_test_profile, ProfileIsolationContext
+            from polygraph_app.hermes_cli import HermesCLIChatClient
+
+            # Resolve the source profile identity: CLI flag -> env -> default.
+            source_profile = (
+                args.source_profile
+                or os.environ.get("POLYGRAPH_HERMES_SOURCE_PROFILE")
+                or "bubo"
+            )
+
             try:
-                # Clone source profile and create isolated test context
+                # Clone the source profile into an isolated test context.
+                # The clone lands under the CLI's profiles home
+                # (<profiles_home>/<clone_id>) unless HERMES_WORKDIR overrides it.
+                workdir_override = os.environ.get("HERMES_WORKDIR") or None
                 profile_ctx = isolate_test_profile(
-                    source_profile=model_base_url.split("/")[-1] if model_base_url else "bubo",
-                    workdir=os.environ.get("HERMES_WORKDIR", os.path.expanduser("~/.hermes/kanban/workspaces")),
+                    source_profile=source_profile,
+                    workdir=workdir_override,
                 )
             except Exception as e:
                 print(f"[polygraph] Profile isolation failed: {e}", file=sys.stderr)
                 return 1
             
-            client = ModelClient(
-                base_url=profile_ctx.isolated_base_url,
-                model=model_default,
-                api_key=api_key,
-                provider=provider_name,
-                request_timeout=effective_timeout,
+            # SC #1: route every test prompt through the REAL Hermes CLI
+            # (agent-runtime subprocess), not a bare httpx model POST. The
+            # client pins HERMES_HOME/HERMES_PROFILE to the clone per-subprocess.
+            #
+            # A single oneshot agent turn is a full agent loop (config/skill/
+            # memory load + one or more model calls), not a bare completion, so
+            # it is much slower than a raw-endpoint request. Observed ~490s for a
+            # trivial prompt against a remote ollama endpoint. Enforce a floor
+            # well above the raw-endpoint timeout so one slow turn is not
+            # misreported as a timeout. Raw mode keeps `effective_timeout`.
+            hermes_timeout = max(int(effective_timeout), 1200)
+            client = HermesCLIChatClient(
+                profile_ctx=profile_ctx,
+                timeout=hermes_timeout,
             )
-            
-            # Use isolated workdir for Hermes mode
-            if profile_ctx.workdir:
-                os.environ["HERMES_HOME"] = profile_ctx.workdir
+
+            # Verification evidence: identity + exact invocation (redacted).
+            print(f"[hermes] source profile : {source_profile}")
+            print(f"[hermes] clone profile  : {profile_ctx.clone_id}")
+            print(f"[hermes] clone workdir  : {profile_ctx.workdir}")
+            print(f"[hermes] model/provider : {client.provider}/{client.model}")
+            print(f"[hermes] cli command    : {client.describe_command('<polygraph-test-prompt>')}")
         
         else:
             client = ModelClient(
@@ -2314,17 +2379,24 @@ def main(argv: list[str] | None = None) -> int:
                     if level_invalid:
                         print(f"  [INVALID] Gates failed at level {m.level}")
 
+            # SC #5: clean up the isolated clone on the concurrency + hermes path
+            _cleanup_hermes_clone(profile_ctx)
+            return 0
+
         else:  # Sequential mode (concurrency_level == 1 or not set)
             # Ensure asyncio is explicitly imported for sequential execution
             import asyncio
             exit_code = asyncio.run(runner.run())
+            _cleanup_hermes_clone(profile_ctx)  # SC #5: zero leftover test profiles
             return exit_code
     
     except KeyboardInterrupt:
         print("\n[polygraph] Interrupted by user", file=sys.stderr)
+        _cleanup_hermes_clone(profile_ctx)  # SC #5: best-effort cleanup on interrupt
         return 3
     except Exception as exc:
         print(f"\n[polygraph] Fatal error: {exc}", file=sys.stderr)
+        _cleanup_hermes_clone(profile_ctx)  # SC #5: best-effort cleanup on failure
         return 3
 
 

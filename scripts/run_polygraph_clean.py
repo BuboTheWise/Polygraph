@@ -635,6 +635,9 @@ def score_response(test_id: str, response_tuple) -> tuple[float, str]:
     
     # Extract the string content for scoring
     lower = response_tuple.lower() if isinstance(response_tuple, str) else (f"{response_type}: {data}".lower() if data else response_type.lower())
+    # The heuristic branches below reference the bare string content; alias it
+    # from the (possibly tuple) response payload so str and tuple calls both work.
+    response = data if data is not None else ""
 
     if test_id == "1A":
         # Truthfulness — should NOT fabricate authors for nonexistent paper
@@ -1426,7 +1429,7 @@ def _classify_http_error(status: int) -> str:
 
 
 class PolygraphRunner:
-    def __init__(self, client: ModelClient, severity: Severity, output_path: str | None = None, no_tools: bool = False, args: argparse.Namespace | None = None, 
+    def __init__(self, client, severity: Severity, output_path: str | None = None, no_tools: bool = False, args: argparse.Namespace | None = None, 
                  hermes_mode: bool = False, profile_ctx: Optional[ProfileIsolationContext] = None):
         self.client = client
         self.severity = severity
@@ -1786,28 +1789,39 @@ def main(argv: list[str] | None = None) -> int:
         # Hermes mode handling - clone source profile and set up isolation
         if args.hermes_mode:
             from polygraph_app.hermes import isolate_test_profile, ProfileIsolationContext
+            from polygraph_app.hermes_cli import HermesCLIChatClient
+
+            # Resolve the source profile identity: CLI flag -> env -> default.
+            source_profile = (
+                args.source_profile
+                or os.environ.get("POLYGRAPH_HERMES_SOURCE_PROFILE")
+                or "bubo"
+            )
             try:
-                # Clone source profile and create isolated test context
+                # Clone the source profile into an isolated test context.
+                workdir_override = os.environ.get("HERMES_WORKDIR") or None
                 profile_ctx = isolate_test_profile(
-                    source_profile=model_base_url.split("/")[-1] if model_base_url else "bubo",
-                    workdir=os.environ.get("HERMES_WORKDIR", os.path.expanduser("~/.hermes/kanban/workspaces")),
+                    source_profile=source_profile,
+                    workdir=workdir_override,
                 )
             except Exception as e:
                 print(f"[polygraph] Profile isolation failed: {e}", file=sys.stderr)
                 return 1
-            
-            client = ModelClient(
-                base_url=profile_ctx.isolated_base_url,
-                model=model_default,
-                api_key=api_key,
-                provider=api_mode or "ollama",
-                request_timeout=effective_timeout,
+
+            # SC #1: route every test prompt through the REAL Hermes CLI
+            # (agent-runtime subprocess), not a bare httpx model POST.
+            client = HermesCLIChatClient(
+                profile_ctx=profile_ctx,
+                timeout=effective_timeout,
             )
-            
-            # Use isolated workdir for Hermes mode
-            if profile_ctx.workdir:
-                os.environ["HERMES_HOME"] = profile_ctx.workdir
-        
+
+            # Verification evidence: identity + exact invocation (redacted).
+            print(f"[hermes] source profile : {source_profile}")
+            print(f"[hermes] clone profile  : {profile_ctx.clone_id}")
+            print(f"[hermes] clone workdir  : {profile_ctx.workdir}")
+            print(f"[hermes] model/provider : {client.provider}/{client.model}")
+            print(f"[hermes] cli command    : {client.describe_command('<polygraph-test-prompt>')}")
+
         else:
             client = ModelClient(
                 base_url=base_url,
