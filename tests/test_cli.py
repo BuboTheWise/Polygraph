@@ -100,9 +100,15 @@ def test_unknown_flag_rejected():
 # 2. v1.2 operating model — identity flags are NOT CLI flags
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("flag", ["--model", "--base-url", "--api-key", "--provider"])
-def test_identity_flags_removed(flag):
-    """v1.2: identity comes from the profile, not the CLI. These must be rejected."""
+@pytest.mark.parametrize(
+    "flag",
+    ["--model", "--base-url", "--api-key", "--provider", "--max-tokens"],
+)
+def test_documented_but_nonexistent_flags_rejected(flag):
+    """v1.2: identity comes from the profile, not the CLI, and `max_tokens` is an
+    internal cap, not a flag. These are (or were) advertised in older docs but
+    must be rejected by the parser — issue #1: remove documented-but-nonexistent
+    options, do not add them."""
     with pytest.raises(SystemExit):
         parse_args([flag, "x"])
 

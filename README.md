@@ -34,11 +34,11 @@ The `providers:` map and `provider_chain` in `config/polygraph.yaml` are **super
 
 ### Response Cap (v1.2)
 
-`max_tokens` is a **per-response generation cap**, not the model's context window. It is a *named, documented run parameter* (default `4096`), tunable via the `--max-tokens` run flag — it is **not** an identity flag and must not be confused with the profile's `context_length` (e.g. `65536` on the Ollama profiles). Raising it is a deliberate spec/run decision, not a hidden constant, and it never selects a model.
+`max_tokens` is a **per-response generation cap**, not the model's context window. It is a *named, documented internal run parameter* (hard-capped at `4096` by the runner) — **not** a CLI flag (there is no `--max-tokens` flag) and **not** an identity flag — and must not be confused with the profile's `context_length` (e.g. `65536` on the Ollama profiles). Changing it is a deliberate spec-level decision, not a run knob, and it never selects a model.
 
 ### Grading Gate (v1.2)
 
-`--max-error-rate` (0.0–1.0) is an **optional grading gate** that controls how much noise a run may carry. When set, the run **fails** if `(ERROR + NOT_SCORED) / total_scored` exceeds the threshold — so an all-error run cannot pass, and a run where most tests errored is flagged rather than silently scored on the few that ran. It is **off by default** (`None`): the gate only engages when you explicitly set it, so a bare run is unaffected. Like `--max-tokens`, it is a run parameter, not an identity flag.
+`--max-error-rate` (0.0–1.0) is an **optional grading gate** that controls how much noise a run may carry. When set, the run **fails** if `(ERROR + NOT_SCORED) / total_scored` exceeds the threshold — so an all-error run cannot pass, and a run where most tests errored is flagged rather than silently scored on the few that ran. It is **off by default** (`None`): the gate only engages when you explicitly set it, so a bare run is unaffected. Like the internal `max_tokens` cap, it is a run parameter, not an identity flag.
 
 ### Workflow Rules (v1.2 — normative)
 
@@ -143,7 +143,7 @@ Exit codes: 0 = PASS, 1 = FAIL, 2 = config error, 3 = runtime exception.
 |---------|------|---------|
 | 1.0 | 2026-07-28 | Initial release: 11 categories, 4 severity profiles, provider chain, plugin framework |
 | 1.1 | 2026-11-15 | Operating Model (normative): profile-inherent model — no `--model`/`--base-url`/provider chain. CLI docs corrected to actual flags. Broken spec link fixed. |
-| 1.2 | 2026-11-15 | Resolution Mechanism (concrete: runner reads active profile's `model:` block via `HERMES_HOME`/`HERMES_SESSION_PROFILE`; `chat_completions` wire call; `providers`/`provider_chain` superseded). Response cap promoted to a named run parameter (`--max-tokens`, default 4096, distinct from profile `context_length`). Two normative Workflow Rules (run-and-report ≠ develop; verify before you report). |
+| 1.2 | 2026-11-15 | Resolution Mechanism (concrete: runner reads active profile's `model:` block via `HERMES_HOME`/`HERMES_SESSION_PROFILE`; `chat_completions` wire call; `providers`/`provider_chain` superseded). Response cap promoted to a named internal run parameter (hard cap 4096, distinct from profile `context_length`; **not** a CLI flag). Two normative Workflow Rules (run-and-report ≠ develop; verify before you report). |
 
 See [`docs/spechistory.md`](docs/spechistory.md) for full changelog.
 

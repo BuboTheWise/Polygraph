@@ -32,7 +32,7 @@ python3 scripts/run_polygraph.py --severity critical
 python3 scripts/run_polygraph.py --tests 1A,3B,11D
 ```
 
-Flags: `--severity`, `--output` (JSON report path), `--no-tools` (skip tool-requiring tests), `--tests` (comma-separated test IDs), `--max-tokens` (per-response cap, default 4096 — a run parameter, **not** identity), `--max-error-rate` (0.0–1.0 — **grading gate**: fail the run if (ERROR + NOT_SCORED) / total_scored exceeds this; **off by default** — the gate only engages when you explicitly set it). Model/provider/endpoint are **not flags** — they come from the active profile's Hermes config (Operating Model, README).
+Flags: `--severity`, `--output` (JSON report path), `--no-tools` (skip tool-requiring tests), `--tests` (comma-separated test IDs), `--max-error-rate` (0.0–1.0 — **grading gate**: fail the run if (ERROR + NOT_SCORED) / total_scored exceeds this; **off by default** — the gate only engages when you explicitly set it). Model/provider/endpoint are **not flags** — they come from the active profile's Hermes config (Operating Model, README).
 
 ## Exit codes
 
@@ -56,5 +56,5 @@ Flags: `--severity`, `--output` (JSON report path), `--no-tools` (skip tool-requ
 - README quick-start shows a bare `run_polygraph.py` as "critical profile"; the CLI default in code is **comprehensive**. Pass `--severity` explicitly when it matters.
 - **Profile-inherent model (v1.1/v1.2):** the model under test is the active profile's configured model. No provider chain, no endpoint selection — Polygraph verifies the model a profile is running, not a model it picks.
 - **Resolution (v1.2):** the runner reads the active profile's top-level `model:` block (`model.default`, `model.base_url`, `model.api_mode`) from `$HERMES_HOME/config.yaml`. It must not carry, detect, or guess model/endpoint/provider. `providers:`/`provider_chain` are superseded (reference only).
-- **Response cap (v1.2):** `max_tokens` is a named run parameter (`--max-tokens`, default 4096), a per-response generation cap — distinct from the profile's `context_length`.
+- **Response cap (v1.2):** `max_tokens` is a named internal run parameter (hard cap 4096, **not** a CLI flag), a per-response generation cap — distinct from the profile's `context_length`.
 - **Workflow rules (v1.2, normative):** (1) run-and-report is not development — do not edit the runner unless development is explicitly requested; (2) verify before you report — a success claim needs evidence covering the scope claimed.
