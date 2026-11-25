@@ -55,3 +55,24 @@ class TestResult:
             "ttft_ms_val": self.ttft_ms_val,
             "actual_tokens_used": self.actual_tokens_used,
         }
+    
+    @classmethod 
+    def from_dict(cls, data: dict) -> 'TestResult':
+        """Create TestResult instance from dictionary (for aggregator wiring)."""
+        return cls(
+            test_id=data["test_id"],
+            test_name=data["test_name"],
+            description=data.get("description", ""),
+            status=data.get("status", "COMPLETED"),
+            passing_categories=data.get("passing_categories", []),
+            failing_categories=data.get("failing_categories", []),
+            result=data.get("result", "success"),
+            exit_code=data.get("exit_code", 0),
+            ttft_ms_val=data.get("ttft_ms_val"),
+            actual_tokens_used=data.get("actual_tokens_used")
+        )
+    
+    def __str__(self) -> str:
+        """String representation for debugging."""
+        return f"TestResult(id={self.test_id}, status={self.status})"
+

@@ -16,6 +16,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 # Now import the scoring components
+from polygraph_app.models.test_result import TestResult
 from polygraph_app.reporting.aggregator import ResultAggregator
 from polygraph_app.reporting.report_generator import ReportGenerator
 
@@ -199,8 +200,11 @@ def run_battery(args):
         test_results.append(mock_result)
         print(f"[polygraph_clean]   Test {test_id} completed with status: {mock_result['status']}")
     
+    # Convert dicts to TestResult objects for proper aggregation
+    test_result_objects = [TestResult.from_dict(r) for r in test_results]
+    
     # Calculate aggregate grade  
-    aggregator = ResultAggregator(tests=test_results)
+    aggregator = ResultAggregator(tests=test_result_objects)
     overall_grade = aggregator.get_overall_grade()
     
     print(f"\n[polygraph_clean] Aggregate grade: {overall_grade}")
