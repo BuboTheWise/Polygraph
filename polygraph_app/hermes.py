@@ -163,13 +163,17 @@ def isolate_test_profile(
     workdir: Optional[str] = None,
     suffix: str = "_test",
 ) -> ProfileIsolationContext:
+    # DEPRECATED: This function is deprecated and will be removed in a future release.
+    # Use the hermes-agent skill or alternative isolation mechanisms instead.
     """Create an isolated, fully functional Hermes test profile by cloning the source.
-
+    
+    DEPRECATED - See docstring for removal notice.
+    
     The clone is a real profile directory (config.yaml + .env + identity + skills)
     under <profiles_home>/<clone_id>, so the Hermes CLI can resolve it. The source
     profile is treated as read-only: we only read from it, and we snapshot its
     .env checksum before and after to prove it was not modified.
-
+    
     Args:
         source_profile: Name of the source profile (e.g. "bubo")
         workdir: Optional override for the clone directory (defaults to
@@ -262,8 +266,11 @@ def read_profile_model(profile_dir) -> tuple[str, str]:
 
 
 def verify_source_unchanged(profile_ctx: ProfileIsolationContext) -> bool:
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
     """Re-checksum the source profile .env and compare against the pre-clone snapshot.
-
+    
+    DEPRECATED - No longer recommended for new use.
+    
     Returns True if the source is unchanged (or had no .env to begin with).
     """
     profiles_home = _profiles_home()
@@ -277,10 +284,13 @@ def verify_source_unchanged(profile_ctx: ProfileIsolationContext) -> bool:
 
 
 def cleanup_profile_clone(profile_ctx: ProfileIsolationContext, confirm: bool = True) -> bool:
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
     """Remove the cloned test profile directory (and only that directory).
 
     Safety: never deletes the source profile or the profiles parent. Returns
     True if the clone is gone (or was already gone), False otherwise.
+    
+    DEPRECATED - No longer recommended for new use.
     """
     clone_dir = Path(profile_ctx.workdir or profile_ctx.clone_dir or "")
     if not str(clone_dir):
@@ -304,7 +314,11 @@ def cleanup_profile_clone(profile_ctx: ProfileIsolationContext, confirm: bool = 
 
 
 def verify_session_isolation(profile_ctx: ProfileIsolationContext) -> bool:
-    """Verify that the test profile has its own session dir and isolated identity."""
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
+    """Verify that the test profile has its own session dir and isolated identity.
+    
+    DEPRECATED - No longer recommended for new use.
+    """
     clone_dir = Path(profile_ctx.workdir or profile_ctx.clone_dir or "")
     if not clone_dir or not clone_dir.exists():
         return False
@@ -316,7 +330,11 @@ def verify_session_isolation(profile_ctx: ProfileIsolationContext) -> bool:
 
 
 def create_fixture_workspace(profile_ctx: ProfileIsolationContext, name: str = "fixtures") -> str:
-    """Create and return a per-profile fixture workspace directory."""
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
+    """Create and return a per-profile fixture workspace directory.
+    
+    DEPRECATED - No longer recommended for new use.
+    """
     if not profile_ctx.fixtures_dir:
         base = Path(profile_ctx.workdir or profile_ctx.clone_dir or ".")
         fixtures_dir = str(base / name)
@@ -327,7 +345,11 @@ def create_fixture_workspace(profile_ctx: ProfileIsolationContext, name: str = "
 
 
 def disable_memory_for_test_profile(profile_ctx: ProfileIsolationContext) -> None:
-    """Mark the test profile as memory-disabled (no bank writes)."""
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
+    """Mark the test profile as memory-disabled (no bank writes).
+    
+    DEPRECATED - No longer recommended for new use.
+    """
     profile_ctx.is_memory_disabled = True
 
 
@@ -335,7 +357,11 @@ def setup_isolated_profile(
     source_profile: str = "bubo",
     workdir: Optional[str] = None,
 ) -> ProfileIsolationContext:
-    """Backwards-compatible alias for isolate_test_profile."""
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
+    """Backwards-compatible alias for isolate_test_profile.
+    
+    DEPRECATED - No longer recommended for new use.
+    """
     ctx = isolate_test_profile(source_profile=source_profile, workdir=workdir)
     disable_memory_for_test_profile(ctx)
     create_fixture_workspace(ctx)
@@ -343,5 +369,9 @@ def setup_isolated_profile(
 
 
 def cleanup_isolated_profile(profile_ctx: ProfileIsolationContext) -> bool:
-    """Backwards-compatible alias for cleanup_profile_clone."""
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
+    """Backwards-compatible alias for cleanup_profile_clone.
+    
+    DEPRECATED - No longer recommended for new use.
+    """
     return cleanup_profile_clone(profile_ctx, confirm=True)

@@ -51,9 +51,12 @@ def compute_profile_checksum(profile_path: Path) -> str:
 
 
 def clone_profile(source_dir: Path, target_dir: Path) -> bool:
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
     """Clone a profile directory without copying .env contents (for security).
     
     Does not copy messaging channels or start gateway/cron jobs.
+    
+    DEPRECATED - No longer recommended for new use.
     """
     try:
         # Copy all files and directories except we'll handle .env specially
@@ -79,6 +82,7 @@ def setup_isolated_profile(
     workdir: Optional[str] = None,
     clone_suffix: str = "_test"
 ) -> Optional[ProfileIsolationContext]:
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
     """Create an isolated test profile by cloning the source profile.
     
     Requirements (Stage 6):
@@ -89,6 +93,8 @@ def setup_isolated_profile(
     - Per-profile fixture workspace directory
     - Skip gateway/cron jobs for clones
     - Session dirs and state DB per-profile
+    
+    DEPRECATED - No longer recommended for new use.
     
     Args:
         source_profile: Name of the source profile (e.g., "bubo")
@@ -168,12 +174,15 @@ def setup_isolated_profile(
 
 
 def verify_session_isolation(profile_ctx: ProfileIsolationContext) -> bool:
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
     """Verify that session dirs and state DB are per-profile.
     
     Checks:
     - Session directory exists and is isolated
     - State DB is not shared with source profile
     - Cron/gateway processes are not running in clone
+    
+    DEPRECATED - No longer recommended for new use.
     
     Returns True if isolation is verified.
     """
@@ -207,9 +216,12 @@ def verify_session_isolation(profile_ctx: ProfileIsolationContext) -> bool:
 
 
 def cleanup_isolated_profile(profile_ctx: ProfileIsolationContext, confirm: bool = True) -> bool:
+    # DEPRECATED - Function kept for backward compatibility during deprecation period
     """Delete only the exact test profiles created by this run.
     
     Never delete by wildcard or delete source profiles. Only remove what this run created.
+    
+    DEPRECATED - No longer recommended for new use.
     """
     if not confirm:
         return True  # Skip actual cleanup on non-confirm
