@@ -1,8 +1,4 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-.env
-.DS_Store
-*.swp
+# Regenerable test/battery outputs (polygraph #6b/#7b)
+artifacts/
+scripts/test_results.jsonl
+scripts/test_summary.json
