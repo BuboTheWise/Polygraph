@@ -1,0 +1,5 @@
+{
+  "service": "memchorus-mcp-server", 
+  "status": "healthy",
+  "check_time": "2026-11-25T12:34:56.789012"
+}

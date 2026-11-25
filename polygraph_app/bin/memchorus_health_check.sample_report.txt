@@ -1,0 +1,32 @@
+# MemChorus Health Check - Sample Report
+
+This file contains a sample output from running memchorus_health_check.py.
+
+## Expected Output Format
+
+```
+# MemChorus Health Check Report
+
+Status: HEALTHY
+Service: memchorus-mcp-server  
+Time: 2026-11-25T12:34:56.789012
+```
+
+## Exit Codes
+
+- `0`: Service is healthy, all checks passed
+- `1`: Service unhealthy or error encountered
+
+## Usage in CI/CD
+
+```bash
+#!/bin/bash
+python polygraph_app/bin/memchorus_health_check.py && echo "✓ Health check passed" || echo "✗ Health check failed"
+```
+
+## Integration Points
+
+This script can be used by:
+- CI pipelines to verify MemChorus server availability  
+- Monitoring systems for uptime tracking
+- Orchestration scripts that need to wait on service readiness

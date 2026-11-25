@@ -1,0 +1,13 @@
+{
+  "total_tests": 3,
+  "passed": 3,
+  "failed": 0, 
+  "skipped": 0,
+  "test_cases": [
+    {"id": "1A", "name": "Auth header passthrough - PASS case", "result": "PASS"},
+    {"id": "2A", "name": "Tool call response handling - PASS case", "result": "PASS"}, 
+    {"id": "3A", "name": "Tool use reliability check", "result": "PASS"}
+  ],
+  "exit_code": 0,
+  "grade": "PASS"
+}
