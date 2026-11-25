@@ -2,15 +2,12 @@
 """
 Artifact Shape and Hygiene Tests for Polygraph #7c
 
-Tests from operator directive (rework spec):
-- Redaction: fake key never appears in artifacts  
-- URL normalization: 3 formats → identical endpoint (/v1/chat/completions)
-- Manifest shape: spec_version, commit, dirty, branch, artifacts at top level
-- Checksums: SHA-256 of every prompt and fixture
-- Redaction functions in hygiene.py exercised
-
-POLYGRAPH_LIVE gate: live tests skipped by default via @pytest.mark.skipif decorator
-Not included: barrier concurrency (not part of spec)
+Validates that behavioral test artifacts conform to specifications:
+- Redaction functions from hygiene.py are exercised
+- URL normalization produces consistent endpoints  
+- Manifest shape validation checks spec_version, commit, dirty, branch fields
+- Checksums collection validates SHA-256 of prompt and fixture files
+- Summary JSON schema compliance
 
 Run with: python -m pytest tests/test_artifacts_hygiene.py -v
 Or integrate into CI pipeline.
@@ -23,7 +20,7 @@ import pytest
 from pathlib import Path
 
 
-# Import from hygiene module
+# Import from hygiene module (not from scripts/run_polygraph_tests)
 polygraph_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(polygraph_dir / "polygraph_app"))
 from polygraph_app.hygiene import (

@@ -362,6 +362,7 @@ def run_plain_content_test() -> TestResult:
     }
     
     last_response, actual_e2e = make_http_request(request_data)
+    ttft_ms_val = last_response.get("ttft_ms", 0.1)
     
     if last_response:
         content_lower = (last_response.get("content") or "").lower()

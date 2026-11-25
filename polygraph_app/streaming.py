@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Union
 
 if TYPE_CHECKING:
@@ -31,7 +31,20 @@ class StreamMetrics:
     
     ttft_content: float | None = None  # time to first content token
     
-    ttft_any: float | None = None  # time to first any token
+    ttft_ms: float | None = None  # time to first any token
+    
+    e2e: float | None = None  # end-to-end latency
+    
+    http_status: int = 200  # HTTP status code
+    
+    error_class: str = "none"  # error classification
+    
+    def __post_init__(self):
+        if self.error is None and not self.http_status:
+            self.error = ""
+
+
+def run_mock_server():
     
     t_done: float | None = None  # monotonic time when stream completed/error
     
@@ -46,17 +59,8 @@ class StreamMetrics:
     total_tokens_prompt: int | None = None
     total_tokens_completion: int | None = None
 
-    @property
-    def is_complete(self) -> bool:
-        """Stream has fully completed."""
-        return self.t_done is not None
-    
-    @property
-    def is_error(self) -> bool:
-        """Stream ended with an error."""
-        return self.error_class != "none"
 
-
+@dataclass
 class StreamError(Exception):
     """Error that occurs during streaming."""
     code: str = ""
@@ -172,7 +176,7 @@ async def stream_with_metrics(
         prompt: User prompt (used only for logging if needed)
         model: Model identifier
         timeout: Request timeout in seconds
-    
+        
     Yields:
         Tuple of (metrics_dict, chunk_dict) for each SSE event including final metrics.
     
@@ -199,7 +203,7 @@ async def stream_with_metrics(
         metrics = StreamMetrics(
             t_send=t_send,
             ttft_content=first_chunk_time,
-            ttft_any=first_chunk_time or (time.monotonic() - t_send),
+            ttft_ms=first_chunk_time or (time.monotonic() - t_send),
             e2e=time.monotonic() - t_send,
             http_status=200,
             error_class="none",
@@ -211,8 +215,7 @@ async def stream_with_metrics(
     final_metrics = StreamMetrics(
         t_send=t_send,
         ttft_content=first_chunk_time,
-        ttft_any=time.monotonic() - t_send,
-        t_done=time.monotonic(),
+        ttft_ms=time.monotonic() - t_send,
         e2e=time.monotonic() - t_send,
         http_status=200,
         error_class="none",

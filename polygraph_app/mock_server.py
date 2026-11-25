@@ -121,7 +121,9 @@ class MockResponse:
     tool_calls: [] = field(default_factory=list)
     error: str | None = None
     http_status: int = 200
-    ttft_any: float | None = None
+    ttft_ms: float | None = None
+    e2e_ms: float | None = None
+    wall_clock_ms: float | None = None
     chunks: list[str] = field(default_factory=list)  # For streaming
     
     def __post_init__(self):
@@ -169,6 +171,11 @@ class MockServer:
         needs_tools = "tool_calls" in test_case
         needs_malformed_json = "malformed_json" in test_case
         needs_text_embedded = "text_embedded" in test_case
+        needs_disconnect = test_case == "mid_stream_disconnect"  # mid_stream_disconnect triggers disconnect after n chunks
+        
+        # Extract disconnect_after_chunk from request_data (for HTTP requests)
+        disconnect_from_data = request_data.get("disconnect_after_chunk") if isinstance(request_data, dict) else None
+        disconnect_after_chunk = kwargs.get("disconnect_after_chunk") or disconnect_from_data
         
         # Handle malformed JSON
         if needs_malformed_json:
@@ -180,20 +187,18 @@ class MockServer:
         # Generate response content based on test case
         if needs_reasoning:
             responses = [MockResponse(
-                content="Here's my answer to your question.",
+                content="What is 2+2? That equals 4. Here's my answer step by step: adding 2 and 2 gives us 4.",
                 reasoning_content="Thinking through the problem step by step...",
-                ttft_any=t_start,
+                ttft_ms=t_start,
             )]
         elif needs_tools:
             responses = [MockResponse(
                 tool_calls=[{"name": "get_current_weather", "arguments": '{"location": "Tokyo"}'}],
-                content="I called the weather API for you.",
-                ttft_any=t_start,
+                content="I called the weather API for you.",ttft_ms=t_start,
             )]
         elif needs_text_embedded:
             responses = [MockResponse(
-                content="Let me check that for you: I'll call get_current_weather(location='Tokyo')",
-                ttft_any=t_start,
+                content="Let me check that for you: I'll call get_current_weather(location='Tokyo')",ttft_ms=t_start,
             )]
         else:
             prompt = request_data.get("prompt", "") or "Hello!"
@@ -202,8 +207,7 @@ class MockServer:
             content_len = len(prompt)
             chunks = [prompt[i:i+chunk_size] for i in range(0, min(content_len, 50), chunk_size)]
             responses = [MockResponse(
-                content="".join(chunks),
-                ttft_any=t_start if chunks else None,
+                content="".join(chunks),ttft_ms=t_start if chunks else None,
             )]
         
         # Check for disconnect (streamed chunk count)
@@ -471,5 +475,378 @@ def run_mock_server_tests():
     print("=" * 60)
 
 
+# =============================================================================
+# Async HTTP Server for behavioral matrix tests (subprocess mode)
+# =============================================================================
+
+import argparse
+
+
+class AsyncMockHTTPServer:
+    """
+    Async HTTP server that simulates OpenAI-compatible endpoint.
+    
+    This runs as a subprocess and allows real HTTP requests with timing measurement.
+    Supports all the same test cases as the in-process MockServer.
+    """
+    
+    def __init__(self, host: str = "127.0.0.1", port: int = 8000, model: str = "qwen3.5:9b"):
+        self.host = host
+        self.port = port
+        self.model = model
+        self.server_task = None
+        self.running = False
+        
+    async def handle_request(self, reader, writer):
+        """Handle incoming HTTP request."""
+        try:
+            # Read HTTP request line
+            request_line = await reader.readline()
+            if not request_line:
+                writer.close()
+                return
+                
+            parts = request_line.decode().strip().split()
+            if len(parts) < 2:
+                response = self._error_response(400, "Bad Request")
+                await self._send_response(writer, response)
+                writer.close()
+                return
+                
+            method, path = parts[0], parts[1]
+            
+            # Read body if present
+            content_length = 0
+            while True:
+                header_line = await reader.readline()
+                if header_line.startswith(b"\r\n") or header_line == b"\r\n" or not header_line:
+                    break
+                if header_line.decode().lower().startswith("content-length:"):
+                    try:
+                        content_length = int(header_line.decode().split(":")[1].strip())
+                    except ValueError:
+                        response = self._error_response(400, "Invalid Content-Length")
+                        await self._send_response(writer, response)
+                        writer.close()
+                        return
+            
+            body = b""
+            while len(body) < content_length:
+                chunk = await reader.read(min(content_length - len(body), 65536))
+                if not chunk:
+                    break
+                body += chunk
+                
+            # Parse request data
+            try:
+                request_data = json.loads(body.decode()) if body else {"messages": [{"role": "user", "content": "Hello"}]}
+            except json.JSONDecodeError:
+                response = self._error_response(400, "Invalid JSON")
+                await self._send_response(writer, response)
+                writer.close()
+                return
+            
+            # Extract request parameters
+            test_case = request_data.get("test_case", "")
+            delay_ms = request_data.pop("delay_ms", 0) if isinstance(request_data, dict) else 0
+            error_status = request_data.pop("error_status", None) if isinstance(request_data, dict) else None
+            disconnect_after_chunk = request_data.get("disconnect_after_chunk") if isinstance(request_data, dict) else None
+            
+            # Get test case flags
+            needs_reasoning = "reasoning" in test_case
+            needs_tools = "tool_calls" in test_case
+            needs_malformed_json = "malformed_json" in test_case
+            needs_text_embedded = "text_embedded" in test_case
+            needs_disconnect = test_case == "mid_stream_disconnect"  # Handle mid-stream disconnect for tests
+            needs_slow_first_byte = delay_ms > 0
+            
+            # Handle malformed JSON request
+            if needs_malformed_json:
+                response = self._error_response(400, "Invalid JSON in tool call arguments")
+                await self._send_response(writer, response)
+                writer.close()
+                return
+            
+            # Apply delay (simulates TTFT or network latency)
+            if needs_slow_first_byte and delay_ms > 0:
+                await asyncio.sleep(delay_ms / 1000)
+            
+            # Start timing for TTFT
+            t_start = time.monotonic()
+            
+            # Generate response based on test case
+            messages = request_data.get("messages", [{"role": "user", "content": "Hello"}])
+            prompt = messages[0].get("content", "") if messages else "Hello!"
+
+            # Handle mid-stream disconnect for this test case
+            if needs_disconnect:
+                split_idx = min(100, len(prompt))  # Disconnect after ~100 chars for the test
+            else:
+                split_idx = None
+            
+            # End timing after content generation (once for all paths)
+            t_end = time.monotonic()
+            
+            # Handle mid-stream disconnect - insert marker into response content
+            if needs_disconnect and split_idx is not None:
+                disconnect_marker = f"\n\n[DISCONNECTED AT CHUNK {disconnect_after_chunk} INTERRUPTED]"
+            else:
+                disconnect_marker = ""
+
+            # Handle mid-stream disconnect - append marker to ALL response content
+            if needs_disconnect and split_idx is not None:
+                disconnect_marker = f"\n\n[DISCONNECTED AT CHUNK {disconnect_after_chunk} INTERRUPTED]"
+            else:
+                disconnect_marker = ""
+
+            if needs_reasoning:
+                content = "Here's my answer to your question." + disconnect_marker
+                reasoning_content = "Thinking through the problem step by step..."
+            elif needs_tools:
+                content = "I called the weather API for you." + disconnect_marker
+                tool_calls = [{"type": "function", "function": {"name": "get_current_weather", "arguments": {"location": "Tokyo"}}}]
+            elif needs_text_embedded:
+                content = "Let me check that for you: I'll call get_current_weather(location='Tokyo')" + disconnect_marker
+            else:
+                # Plain text response (streaming simulation) - always define chunk_size
+                chunk_size = 3
+                chunks = [prompt[i:i+chunk_size] for i in range(0, min(len(prompt), 50), chunk_size)]
+                content = "".join(chunks) + disconnect_marker
+            
+            if error_status and error_status != 200:
+                http_status = error_status
+                
+                # Create response in Ollama API format even for errors
+                error_msg = f"Mock {error_status} error" if hasattr(response_obj, 'error') else None
+                response_obj = MockResponse(
+                    content="",
+                    reasoning_content=None,
+                    tool_calls=[],
+                    ttft_ms=float(t_start) if t_start and not isinstance(t_start, (int, float)) else t_start,
+                    e2e_ms=(t_end - t_start) * 1000 if hasattr(time, 'monotonic') else None,
+                    wall_clock_ms=(time.monotonic() - t_start),
+                    http_status=http_status,
+                    error=error_msg,
+                )
+                
+                message_dict = {
+                    "content": "",
+                    "role": "assistant",
+                    "ttft_ms": response_obj.ttft_ms,
+                    "e2e_ms": response_obj.e2e_ms if hasattr(response_obj, 'e2e_ms') else (t_end - t_start) * 1000,
+                    "wall_clock_ms": response_obj.wall_clock_ms,
+                }
+                
+                if error_msg:
+                    message_dict["error"] = error_msg
+                
+                full_response = {
+                    "id": f"mock-{len(request_data)}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": request_data.get("model", "qwen3.5:9b"),
+                    "choices": [{
+                        "index": 0,
+                        "message": message_dict,
+                        "finish_reason": "content_filter" if response_obj.error else "stop",
+                        "delta": {}
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 15, "total_tokens": 25},
+                }
+            elif disconnect_after_chunk is not None and disconnect_after_chunk > 0:
+                # Stream disconnect - split content into chunks with disconnect signal
+                split_idx = min(disconnect_after_chunk * 5, len(content))
+                
+                response_obj = MockResponse(
+                    content=content[:split_idx] + f"\n\n[DISCONNECTED - CHUNK {disconnect_after_chunk} INTERRUPTED]",
+                    reasoning_content=None,
+                    tool_calls=[],
+                    ttft_ms=float(t_start) if t_start and not isinstance(t_start, (int, float)) else t_start,
+                    e2e_ms=(t_end - t_start) * 1000 if hasattr(time, 'monotonic') else None,
+                    wall_clock_ms=(time.monotonic() - t_start),
+                )
+                # Add empty chunk markers for disconnect (simulate streaming behavior)
+                response_obj.chunks = [content[:i+chunk_size] for i in range(0, split_idx, chunk_size)]
+                
+                # Wrap in Ollama format with streaming chunks
+                message_dict = {
+                    "content": response_obj.content,
+                    "role": "assistant",
+                    "ttft_ms": response_obj.ttft_ms,
+                    "e2e_ms": response_obj.e2e_ms if hasattr(response_obj, 'e2e_ms') else (t_end - t_start) * 1000,
+                    "wall_clock_ms": response_obj.wall_clock_ms,
+                }
+                
+                full_response = {
+                    "id": f"mock-{len(request_data)}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": request_data.get("model", "qwen3.5:9b"),
+                    "choices": [{
+                        "index": 0,
+                        "message": message_dict,
+                        "finish_reason": "stop",
+                        "delta": {}
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 15, "total_tokens": 25},
+                }
+            else:
+                http_status = 200
+                response_obj = MockResponse(
+                    content=content,
+                    reasoning_content=reasoning_content if needs_reasoning else None,
+                    tool_calls=tool_calls if needs_tools else [],
+                    ttft_ms=float(t_start) if t_start and not isinstance(t_start, (int, float)) else t_start,  # Ensure float or existing numeric value
+                    e2e_ms=(t_end - t_start) * 1000 if hasattr(time, 'monotonic') else None,
+                    wall_clock_ms=(time.monotonic() - t_start),
+                )
+            
+            # Send response in Ollama API format with choices[0].message structure
+            message_dict = {
+                "content": response_obj.content,
+                "role": "assistant",
+                "ttft_ms": response_obj.ttft_ms,
+                "e2e_ms": response_obj.e2e_ms if hasattr(response_obj, 'e2e_ms') else (time.monotonic() - t_start) * 1000,
+                "wall_clock_ms": response_obj.wall_clock_ms if hasattr(response_obj, 'wall_clock_ms') else None,
+            }
+            
+            if response_obj.reasoning_content is not None:
+                message_dict["reasoning_content"] = response_obj.reasoning_content
+            
+            if response_obj.tool_calls:
+                message_dict["tool_calls"] = response_obj.tool_calls
+            
+            if response_obj.error:
+                message_dict["error"] = response_obj.error
+            
+            # Wrap in choices array like real Ollama API
+            full_response = {
+                "id": f"mock-{len(request_data)}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": request_data.get("model", "qwen3.5:9b"),
+                "choices": [{
+                    "index": 0,
+                    "message": message_dict,
+                    "finish_reason": "stop" if response_obj.error is None else "content_filter",
+                    "delta": {}
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 15, "total_tokens": 25},
+            }
+            
+            response_json = json.dumps(full_response)
+            response = self._success_response(200, response_json)
+            await self._send_response(writer, response)
+            
+        except Exception as e:
+            try:
+                t_end = time.monotonic()  # Track timing even for error cases
+                error_msg = f"Server error: {str(e)}"
+                response = self._error_response(500, error_msg)
+                await self._send_response(writer, response)
+            except:
+                pass
+        finally:
+            writer.close()
+            
+    def _success_response(self, status: int, body: str) -> bytes:
+        """Create success HTTP response."""
+        headers = (
+            f"HTTP/1.1 {status} OK\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Connection: close\r\n\r\n"
+        )
+        return headers.encode() + body.encode()
+    
+    def _error_response(self, status: int, message: str) -> bytes:
+        """Create error HTTP response."""
+        http_text = {"Bad Request": 400, "Not Found": 404, "Internal Server Error": 500}.get(
+            f"{status}", "Internal Server Error"
+        )
+        body = json.dumps({"error": message})
+        headers = (
+            f"HTTP/1.1 {status} {http_text}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Connection: close\r\n\r\n"
+        )
+        return headers.encode() + body.encode()
+        
+    async def _send_response(self, writer, response_bytes):
+        """Send response to client."""
+        try:
+            writer.write(response_bytes)
+            await writer.drain()
+        except Exception:
+            pass  # Client disconnected
+        finally:
+            writer.close()
+            
+    async def start(self):
+        """Start the server."""
+        self._server = await asyncio.start_server(
+            lambda r, w: asyncio.create_task(self.handle_request(r, w)),
+            self.host,
+            self.port,
+            reuse_address=True,
+        )
+        print(f"Mock HTTP server listening on http://{self.host}:{self.port}")
+        
+    async def _serve(self):
+        """Serve requests until stopped."""
+        self._server = await asyncio.start_server(
+            lambda r, w: asyncio.create_task(self.handle_request(r, w)),
+            self.host,
+            self.port,
+            reuse_address=True,
+        )
+        self.running = True
+        print(f"Mock HTTP server listening on http://{self.host}:{self.port}", flush=True)
+        try:
+            async with self._server:
+                await self._server.wait_closed()  # holds the loop while serving
+        finally:
+            await self.stop()  # properly await stop() coroutine
+
+    async def stop(self):
+        """Stop the server."""
+        self.running = False
+        try:
+            self._server.close()
+        except Exception:
+            pass
+        
+    def run_forever(self):
+        """Run indefinitely (for subprocess)."""
+        asyncio.run(self._serve())
+
+
+async def run_mock_server():
+    """Run mock HTTP server in main event loop."""
+    server = AsyncMockHTTPServer(host="127.0.0.1", port=8000)
+    await server._serve()
+
+
+def main():
+    """Main entry point for subprocess."""
+    parser = argparse.ArgumentParser(description="Run Polygraph mock HTTP server")
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=8000, help="Port to listen on")
+    parser.add_argument("--model", default="qwen3.5:9b", help="Model name for metadata")
+    
+    args = parser.parse_args()
+    
+    server = AsyncMockHTTPServer(host=args.host, port=args.port, model=args.model)
+    
+    try:
+        asyncio.run(server._serve())
+    except KeyboardInterrupt:
+        print("\nServer shutting down...")
+    finally:
+        server.stop()
+
+
 if __name__ == "__main__":
-    run_mock_server_tests()
+    main()
+
