@@ -414,6 +414,8 @@ def run_reasoning_test() -> TestResult:
     if last_response:
         content_lower = (last_response.get("content") or "").lower()
         
+        ttft_ms_val = last_response.get("ttft_ms", 0.1)
+        actual = f'Response with reasoning steps: {last_response.get('content', '')[:200]}'
         # Check that the response contains reasoning steps  
         content_nonempty = len(content_lower.strip()) > 10
         
